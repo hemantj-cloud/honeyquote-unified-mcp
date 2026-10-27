@@ -296,27 +296,43 @@ export default function PolicyServicingWidget() {
     if (isRenewing || renewalTriggered) return;
     setIsRenewing(true);
     setRenewalTriggered(true);
+    setActionNotice('Initiating policy renewal and preparing on-record verification...');
 
     try {
       const openaiSdk = (window as any).openai;
-      if (typeof openaiSdk?.sendFollowUpMessage === 'function') {
-        openaiSdk.sendFollowUpMessage({ prompt: 'I want to renew my policy' });
+      if (typeof openaiSdk?.callTool === 'function') {
+        const response = await openaiSdk.callTool('get_renewal_property_details', {
+          ticketId: resolvedData.ticketId,
+        });
+        let payload = response?.structuredContent || response;
+        if (!response?.structuredContent && response?.content?.[0]?.text) {
+          try {
+            payload = JSON.parse(response.content[0].text);
+          } catch {}
+        }
+        setActionNotice('Property details retrieved for your review.');
       } else {
-        window.parent.postMessage({
-          type: 'nitro:widget_action',
-          action: 'renew_policy',
-          prompt: 'I want to renew my policy'
-        }, '*');
+        // Fallback via MCP HTTP call if running outside NitroChat bridge
+        const workflowApiUrl = (resolvedData as any).workflowApiUrl || 'http://localhost:3000';
+        const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
+        await fetch(mcpEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: 'get_renewal_property_details',
+              arguments: { ticketId: resolvedData.ticketId },
+            },
+          }),
+        });
+        setActionNotice('Property details retrieved for your review.');
       }
-      setActionNotice('Renewal started. Please review your property details in the chat.');
     } catch (err) {
-      console.warn('Renew policy trigger error:', err);
-      window.parent.postMessage({
-        type: 'nitro:widget_action',
-        action: 'renew_policy',
-        prompt: 'I want to renew my policy'
-      }, '*');
-      setActionNotice('Renewal started. Please review your property details in the chat.');
+      console.warn('Renew policy callTool error:', err);
+      setActionNotice('Unable to retrieve property details. Please try again.');
     } finally {
       setIsRenewing(false);
     }
