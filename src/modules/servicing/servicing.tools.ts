@@ -284,8 +284,22 @@ export class ServicingTools {
       `Presented renewal home details reconfirmation for ${attrs.address}.`
     );
 
+    const roofDesc = attrs.roofGeometry && attrs.roofType
+      ? `${attrs.roofGeometry}, ${attrs.roofType} (Replaced ${attrs.roofYear || 2018})`
+      : `${attrs.roofType || 'Concrete Tile'} (Replaced ${attrs.roofYear || 2018})`;
+
+    const sqftFormatted = attrs.squareFootage ? Number(attrs.squareFootage).toLocaleString() : '2,450';
+
     return {
-      userFacing: `Here are the home details on record for your renewal — please confirm they're still accurate in the card below, then reply yes.`,
+      userFacing:
+        `Home details on record for your renewal:\n\n` +
+        `• Property Address: ${attrs.address || '1244 Ocean Drive, Miami Beach, FL 33139'}\n` +
+        `• Year Built: ${attrs.yearBuilt || 2018}\n` +
+        `• Square Footage: ${sqftFormatted} sq ft\n` +
+        `• Construction Type: ${attrs.constructionType || 'Reinforced Masonry / Concrete'}\n` +
+        `• Roof Geometry & Age: ${roofDesc}\n` +
+        `• Primary Use: ${attrs.primaryUse || 'Single Family Residence (Owner Occupied)'}\n\n` +
+        `Are these details still accurate? Reply yes to continue to your renewal quotes.`,
       preventFollowUp: true,
       internal: {
         stage: 'awaiting_property_confirmation',

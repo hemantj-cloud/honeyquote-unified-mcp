@@ -82,20 +82,12 @@ export default function PolicyServicingWidget() {
     return () => clearTimeout(timer);
   }, [isUnauthenticated]);
 
-  const [renewalConfirmationData, setRenewalConfirmationData] = useState<any>(null);
-
   // Extract structured internal data
   const rawInternal = sdkOutput?.internal || sdkOutput || {};
-  const activeInternal = renewalConfirmationData || rawInternal;
+  const activeInternal = rawInternal;
 
-  // When get_renewal_property_details is invoked via the Renew Policy button,
-  // the result is stored in renewalConfirmationData or injected via toolOutput.
-  // Detect the confirmation stage so the card renders the on-record home
-  // details confirmation section at the bottom instead of breaking.
-  const isPropertyConfirmation = Boolean(
-    activeInternal.awaitingPropertyConfirmation === true ||
-    activeInternal.stage === 'awaiting_property_confirmation'
-  );
+  // Property confirmation details are presented conversationally in the chat message
+  const isPropertyConfirmation = false;
   const propertyAttrs = activeInternal.propertyAttributes || {};
   const confirmationAddress = propertyAttrs.address || activeInternal.propertyAddress || activeInternal.address;
   const confirmationRoof =
@@ -260,6 +252,7 @@ export default function PolicyServicingWidget() {
   const [isSubmittingEndorsement, setIsSubmittingEndorsement] = useState<boolean>(false);
   const [endorsementPending, setEndorsementPending] = useState<boolean>(false);
   const [isRenewing, setIsRenewing] = useState<boolean>(false);
+  const [renewalTriggered, setRenewalTriggered] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -296,51 +289,34 @@ export default function PolicyServicingWidget() {
     notifyHeight();
     const timer = setTimeout(notifyHeight, 150);
     return () => clearTimeout(timer);
-  }, [activeTab, actionNotice, missingDocs, signatureNeeded, isMortgageBilled, endorsementPending, isRenewing, isRenewalWindow, isPropertyConfirmation, renewalConfirmationData]);
+  }, [activeTab, actionNotice, missingDocs, signatureNeeded, isMortgageBilled, endorsementPending, isRenewing, renewalTriggered, isRenewalWindow]);
 
   // Handler: Policy Renewal trigger to parent conversational agent (Step 3 Handshake)
   const handleRenewPolicy = async () => {
-    if (isRenewing) return;
+    if (isRenewing || renewalTriggered) return;
     setIsRenewing(true);
-    setActionNotice('Initiating policy renewal and preparing on-record verification...');
+    setRenewalTriggered(true);
 
     try {
       const openaiSdk = (window as any).openai;
-      if (typeof openaiSdk?.callTool === 'function') {
-        const response = await openaiSdk.callTool('get_renewal_property_details', {
-          ticketId: resolvedData.ticketId,
-        });
-        let payload = response?.structuredContent || response;
-        if (!response?.structuredContent && response?.content?.[0]?.text) {
-          try {
-            payload = JSON.parse(response.content[0].text);
-          } catch (_) {}
-        }
-        const result = payload?.internal || payload;
-        if (response?.isError || result?.authenticated === false || result?.success === false ||
-          result?.ok === false || (result?.awaitingPropertyConfirmation !== true && !result?.propertyAttributes)) {
-          throw new Error('Property confirmation was not returned');
-        }
-        setRenewalConfirmationData(result);
-        setActionNotice('Property details retrieved. Please review below.');
+      if (typeof openaiSdk?.sendFollowUpMessage === 'function') {
+        openaiSdk.sendFollowUpMessage({ prompt: 'I want to renew my policy' });
       } else {
-        console.warn('[policy-widget] callTool unavailable in this host; posting widget action fallback');
         window.parent.postMessage({
           type: 'nitro:widget_action',
           action: 'renew_policy',
           prompt: 'I want to renew my policy'
         }, '*');
-        setActionNotice('Renewal requested. Please confirm your details in the chat.');
       }
+      setActionNotice('Renewal started. Please review your property details in the chat.');
     } catch (err) {
-      console.warn('Renew policy callTool error:', err);
-      // Fallback postMessage to parent chat if callTool fails so the flow never halts
+      console.warn('Renew policy trigger error:', err);
       window.parent.postMessage({
         type: 'nitro:widget_action',
         action: 'renew_policy',
         prompt: 'I want to renew my policy'
       }, '*');
-      setActionNotice('Property details requested. You can also confirm in the chat.');
+      setActionNotice('Renewal started. Please review your property details in the chat.');
     } finally {
       setIsRenewing(false);
     }
@@ -873,7 +849,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           <button
             type="button"
             onClick={handleRenewPolicy}
-            disabled={isRenewing || isPropertyConfirmation}
+            disabled={isRenewing || renewalTriggered}
             style={{
               padding: '9px 20px',
               fontSize: '12.5px',
@@ -882,8 +858,8 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               background: '#276152',
               color: '#FFFFFF',
               border: 'none',
-              cursor: (isRenewing || isPropertyConfirmation) ? 'not-allowed' : 'pointer',
-              opacity: (isRenewing || isPropertyConfirmation) ? 0.75 : 1,
+              cursor: (isRenewing || renewalTriggered) ? 'not-allowed' : 'pointer',
+              opacity: (isRenewing || renewalTriggered) ? 0.75 : 1,
               boxShadow: '0 3px 10px rgba(39, 97, 82, 0.28)',
               transition: 'all 0.15s ease',
               display: 'flex',
@@ -898,7 +874,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 <span>⏳</span>
                 <span>Initiating Renewal...</span>
               </>
-            ) : isPropertyConfirmation ? (
+            ) : renewalTriggered ? (
               <>
                 <span>✅</span>
                 <span>Renewal Started</span>
@@ -1306,72 +1282,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
         </div>
       )}
 
-      {/* On-record home details confirmation — rendered at the bottom of the
-          widget when get_renewal_property_details output is injected */}
-      {isPropertyConfirmation && (
-        <div
-          style={{
-            background: colors.cardBg,
-            border: `1px solid ${colors.border}`,
-            borderRadius: '14px',
-            padding: '16px 18px',
-            marginBottom: '16px',
-          }}
-        >
-          <div
-            style={{
-              fontSize: '13.5px',
-              fontWeight: 700,
-              color: colors.textPrimary,
-              marginBottom: '4px',
-              letterSpacing: '-0.01em',
-            }}
-          >
-            Home details on record for your renewal
-          </div>
-          <div
-            style={{
-              fontSize: '12px',
-              color: colors.textSecondary,
-              marginBottom: '12px',
-              lineHeight: 1.45,
-            }}
-          >
-            Please confirm they're still accurate before quotes are prepared:
-          </div>
-          <ul
-            style={{
-              margin: 0,
-              paddingLeft: '18px',
-              fontSize: '12.5px',
-              color: colors.textPrimary,
-              lineHeight: 1.9,
-            }}
-          >
-            <li><strong>Property Address:</strong> {confirmationAddress || 'Not available on record'}</li>
-            <li><strong>Year Built:</strong> {propertyAttrs.yearBuilt || 'Not available on record'}</li>
-            <li><strong>Square Footage:</strong> {confirmationSqft}</li>
-            <li><strong>Construction Type:</strong> {propertyAttrs.constructionType || 'Not available on record'}</li>
-            <li><strong>Roof Geometry &amp; Age:</strong> {confirmationRoof}</li>
-            <li><strong>Primary Use:</strong> {propertyAttrs.primaryUse || 'Not available on record'}</li>
-          </ul>
-          <div
-            style={{
-              marginTop: '12px',
-              padding: '10px 14px',
-              borderRadius: '10px',
-              background: colors.stripBg,
-              border: `1px solid ${colors.border}`,
-              fontSize: '12.5px',
-              fontWeight: 600,
-              color: '#276152',
-              textAlign: 'center',
-            }}
-          >
-            Are these details still accurate? Reply <strong>yes</strong> in the chat to continue to your renewal quotes.
-          </div>
-        </div>
-      )}
+
 
       {/* Footer Action Bar - HoneyQuote rounded button style */}
       <div
