@@ -222,6 +222,9 @@ export class InsuranceService {
     private async registerUser(user: UserDetails): Promise<string> {
         const { firstName, lastName } = this.splitName(user.name);
 
+        const digits = user.phone.replace(/\D/g, '');
+        const phoneNumber = digits.length >= 10 ? digits.slice(-10) : digits.padEnd(10, '0');
+
         const response = await this.fetchWithAuth(`${MCP_API_BASE_URL}/user/register`, {
             method: 'POST',
             headers: {
@@ -231,7 +234,7 @@ export class InsuranceService {
                 firstName,
                 lastName,
                 email: user.email,
-                phoneNumber: user.phone,
+                phoneNumber,
                 address: user.address,
             }),
         });
