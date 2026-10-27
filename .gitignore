@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.nitro/
+.env
+.env.local
+.DS_Store
+*.log
+src/widgets/.next/
+src/widgets/out/
+src/widgets/node_modules/
