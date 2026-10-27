@@ -36,7 +36,7 @@ async function smokeTest() {
 
   // Test 2: send_customer_otp
   const otpRes = await callTool('send_customer_otp', { identifier: '+919503760623' });
-  if (!otpRes || !otpRes.userFacing.includes('verification code has been dispatched')) {
+  if (!otpRes || otpRes.internal?.sent !== true) {
     throw new Error('send_customer_otp failed');
   }
 

@@ -70,7 +70,7 @@ export default function PolicyServicingWidget() {
           {
             type: 'nitro:set_height',
             widgetId: widgetId,
-            height: isUnauthenticated ? Math.max(height, 130) : Math.max(height, 370),
+            height: isUnauthenticated ? 0 : Math.max(height, 370),
           },
           '*'
         );
@@ -697,82 +697,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
       };
 
   if (isUnauthenticated) {
-    return (
-      <div
-        ref={containerRef}
-        data-build="2026-10-26-r1"
-        style={{
-          width: '100%',
-          maxWidth: '680px',
-          margin: '0 auto',
-          background: colors.bg,
-          border: `1px solid ${colors.warningBorder}`,
-          borderRadius: '18px',
-          padding: '20px 24px',
-          boxShadow: '0 8px 30px -4px rgba(13, 34, 29, 0.08)',
-          boxSizing: 'border-box',
-          fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
-          <div
-            style={{
-              width: '46px',
-              height: '46px',
-              borderRadius: '12px',
-              background: colors.warningBg,
-              border: `1px solid ${colors.warningBorder}`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '22px',
-              flexShrink: 0,
-            }}
-          >
-            🔒
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-              <span
-                style={{
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.06em',
-                  color: colors.warningText,
-                  background: colors.warningBg,
-                  padding: '3px 10px',
-                  borderRadius: '100px',
-                  border: `1px solid ${colors.warningBorder}`,
-                }}
-              >
-                Security Verification Required
-              </span>
-            </div>
-            <h3
-              style={{
-                margin: '0 0 6px 0',
-                fontSize: '16px',
-                fontWeight: 700,
-                color: colors.textPrimary,
-              }}
-            >
-              Citizens Property Insurance Corporation
-            </h3>
-            <p
-              style={{
-                margin: 0,
-                fontSize: '13px',
-                lineHeight: 1.5,
-                color: colors.textSecondary,
-              }}
-            >
-              Policy limits and coverage details are protected. Please reply with your verified email address or mobile number in the chat to receive a secure one-time verification code.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   return (

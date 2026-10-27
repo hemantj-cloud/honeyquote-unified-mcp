@@ -51,7 +51,6 @@ export class ServicingTools {
     const result = await this.authService.requestOtp(input.identifier);
 
     return {
-      userFacing: `A verification code has been dispatched to ${input.identifier}. Please reply directly in this chat with the 6-digit code to access your policy details.`,
       internal: {
         sent: result.sent,
         channel: result.channel,
@@ -137,7 +136,7 @@ export class ServicingTools {
     if (!this.authService.isSessionAuthenticated()) {
       return {
         userFacing:
-          'For your security, I cannot disclose personal policy information until your identity is verified. Please provide your mobile number or email address so I can send a verification code.',
+          'Please provide your mobile number or email address so I can send a verification code.',
         internal: {
           authenticated: false,
           error: 'UNAUTHENTICATED_SESSION',
@@ -157,16 +156,7 @@ export class ServicingTools {
     );
 
     return {
-      userFacing: [
-        `${
-          this.authService.consumePolicyIntroduction(ticketId)
-            ? 'Thank you, your identity is verified. '
-            : ''
-        }Here are your policy details and coverage limits for your home. You can review everything in the card below.`,
-        renewal.renewalInvitation,
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
+      userFacing: renewal.renewalInvitation || '',
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
@@ -207,7 +197,7 @@ export class ServicingTools {
     if (!this.authService.isSessionAuthenticated()) {
       return {
         userFacing:
-          'For your security, identity verification is required before checking pending servicing tasks. Please provide your mobile number or email address to receive a verification code.',
+          'Please provide your mobile number or email address so I can send a verification code.',
         internal: {
           authenticated: false,
           error: 'UNAUTHENTICATED_SESSION',
@@ -271,7 +261,7 @@ export class ServicingTools {
     if (!this.authService.isSessionAuthenticated()) {
       return {
         userFacing:
-          'For your security, identity verification is required before accessing policy renewal details. Please provide your mobile number or email to verify your identity.',
+          'Please provide your mobile number or email address so I can send a verification code.',
         internal: {
           authenticated: false,
           error: 'UNAUTHENTICATED_SESSION',
@@ -389,7 +379,7 @@ export class ServicingTools {
     _ctx: ExecutionContext
   ) {
     if (!this.authService.isSessionAuthenticated()) {
-      return { success: false, userFacing: 'Please verify your identity before requesting document signatures.', internal: { success: false } };
+      return { success: false, userFacing: 'Please provide your mobile number or email address so I can send a verification code.', internal: { success: false, authenticated: false } };
     }
     const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const result = await this.servicingService.docusignSend({
@@ -416,7 +406,7 @@ export class ServicingTools {
   })
   async docusignStatus(input: { ticketId?: string }, _ctx: ExecutionContext) {
     if (!this.authService.isSessionAuthenticated()) {
-      return { success: false, userFacing: 'Please verify your identity before checking document status.', internal: { success: false } };
+      return { success: false, userFacing: 'Please provide your mobile number or email address so I can send a verification code.', internal: { success: false, authenticated: false } };
     }
     const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const result = await this.servicingService.docusignStatus(ticketId);
