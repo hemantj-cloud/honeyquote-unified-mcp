@@ -169,7 +169,8 @@ function mergeQuotes(current: QuoteCard[], next: QuoteCard[]) {
 export default function InsuranceQuotesWidget() {
   const { getToolOutput } = useWidgetSDK();
   const theme = useTheme();
-  const isDark = theme === 'dark';
+  // Force signature HoneyQuote branded light theme per design specification
+  const isDark = false;
   const toolOutput = getToolOutput<QuoteWidgetOutput>();
   const ratesStreamUrl = resolveRatesStreamUrl(toolOutput);
   const containerRef = useRef<HTMLDivElement>(null);

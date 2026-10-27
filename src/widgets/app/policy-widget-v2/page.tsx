@@ -55,7 +55,8 @@ export default function PolicyServicingWidget() {
   const sdkOutput = getToolOutput<any>();
   const containerRef = useRef<HTMLDivElement>(null);
   const theme = useTheme();
-  const isDark = theme === 'dark';
+  // Force signature HoneyQuote branded light cream card aesthetic per design specification
+  const isDark = false;
 
   const isUnauthenticated = sdkOutput?.internal?.authenticated === false;
 

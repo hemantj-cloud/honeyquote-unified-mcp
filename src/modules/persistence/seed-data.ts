@@ -7,6 +7,7 @@ export interface SeedTicketContext {
   customerPhone: string;
   recipientEmail: string;
   userId: string;
+  paymentStatus?: string;
   billedToMortgage: boolean;
   effectiveDate: string;
   renewalDate: string;

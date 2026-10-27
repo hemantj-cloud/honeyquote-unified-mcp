@@ -20,8 +20,8 @@ async function seed() {
 
   const now = new Date();
   const todayUtc = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
-  const renewalDate = new Date(todayUtc.getTime() + 14 * 86400000).toISOString().slice(0, 10);
-  const effectiveDate = new Date(todayUtc.getTime() - 351 * 86400000).toISOString().slice(0, 10);
+  const renewalDate = '2026-11-09';
+  const effectiveDate = '2025-10-27';
 
   const demoTicket = {
     ticketId: 'HQ-DEMO-001',
@@ -35,10 +35,10 @@ async function seed() {
     customerEmail: customerEmail,
     userId: '6ad9bd5dcfc164fb5ece28e1',
     propertyAddress: '1244 Ocean Drive, Miami Beach, FL 33139',
-    billedToMortgage: true,
+    billedToMortgage: false,
     effectiveDate,
     renewalDate,
-    daysUntilExpiry: 14,
+    daysUntilExpiry: 13,
     isRenewalEligible: true,
     policyStatus: 'active',
     paymentStatus: 'UNPAID',

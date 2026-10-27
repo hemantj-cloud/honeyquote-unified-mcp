@@ -22,7 +22,8 @@ export default function StripePayButtonWidget() {
   const sdkOutput = getToolOutput<any>();
   const containerRef = useRef<HTMLDivElement>(null);
   const theme = useTheme();
-  const isDark = theme === 'dark';
+  // Force signature HoneyQuote branded light theme per design specification
+  const isDark = false;
 
   const rawData: PaymentWidgetData =
     sdkOutput?.internal || sdkOutput?.data || sdkOutput || {};
@@ -122,7 +123,7 @@ export default function StripePayButtonWidget() {
           const payload = await resp.json();
           data = payload?.result || payload;
         }
-        if (data?.status === 'paid') {
+        if (data?.status === 'paid' || data?.internal?.paid === true || data?.internal?.status === 'IN_FORCE_RENEWED') {
           setPaymentStatus('paid');
           if (pollRef.current) clearInterval(pollRef.current);
           try {

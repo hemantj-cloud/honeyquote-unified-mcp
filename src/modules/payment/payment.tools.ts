@@ -78,6 +78,7 @@ export class PaymentTools {
         policyNumber: result.policyNumber,
         ticketId: result.ticketId,
         customerEmail: result.customerEmail,
+        workflowApiUrl: process.env.HQ_SERVICING_API_BASE_URL || 'http://localhost:3000',
         nextStep: 'post_renewal_verification',
       },
     };
@@ -91,6 +92,7 @@ export class PaymentTools {
   })
   @Widget(POLICY_WIDGET)
   async checkStripePaymentStatus(input: CheckPaymentStatusInput, _ctx: ExecutionContext) {
+    const ticketId = input.ticketId || 'HQ-DEMO-001';
     const result = await this.paymentService.checkPaymentStatus(input);
 
     if (result.status !== 'paid') {
@@ -101,15 +103,22 @@ export class PaymentTools {
           paid: false,
           status: 'pending',
           checkoutSessionId: input.checkoutSessionId,
-          ticketId: result.ticketId,
+          ticketId,
         },
       };
     }
 
+    const context: any = result.context || {};
+    const firstName = String(context.customerName || '').split(' ')[0] || 'there';
+
     return {
       userFacing:
-        `Payment received — your policy renewal is confirmed and **in force**.\n\n` +
-        `Your binding confirmation and updated coverage declarations are reflected in the card below.`,
+        `Payment received — your policy renewal with ${context.carrier || 'Citizens'} is confirmed and **in force**.\n\n` +
+        (context.signatureStatus === 'signed'
+          ? 'Your document is signed.'
+          : context.signatureRequired
+          ? `Hey ${firstName}, please sign the renewal document — tap **Sign Now**, or **Send eSign Document** to receive the signing and chatbot links by SMS.`
+          : 'You can review your renewed policy in the card below.'),
       preventFollowUp: true,
       internal: {
         authenticated: true,
@@ -117,7 +126,20 @@ export class PaymentTools {
         presentation: 'renewal',
         paid: true,
         status: 'IN_FORCE_RENEWED',
-        ticketId: result.ticketId,
+        ticketId,
+        policyNumber: context.policyNumber,
+        carrier: context.carrier,
+        coverages: context.coverages,
+        deductibles: context.deductibles,
+        effectiveDate: context.effectiveDate,
+        renewalDate: context.renewalDate,
+        signatureRequired: context.signatureRequired,
+        esignSent: context.esignSent,
+        signatureStatus: context.signatureStatus,
+        missingDocuments: context.missingDocuments,
+        billedToMortgage: context.billedToMortgage,
+        insuredEmail: context.recipientEmail,
+        workflowApiUrl: process.env.HQ_SERVICING_API_BASE_URL || 'http://localhost:3000',
         checkoutSessionId: input.checkoutSessionId,
       },
     };

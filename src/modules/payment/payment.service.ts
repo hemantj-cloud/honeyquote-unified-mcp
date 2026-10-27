@@ -101,6 +101,7 @@ export class PaymentService {
     status: 'paid' | 'pending';
     ticketId: string;
     checkoutSessionId?: string;
+    context?: any;
   }> {
     const ticketId = input.ticketId || 'HQ-DEMO-001';
     const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -122,21 +123,29 @@ export class PaymentService {
       }
     }
 
+    let context: any = {};
     if (isPaid) {
       await this.ticketRepo.updateTicket(ticketId, {
         status: 'IN_FORCE_RENEWED',
+        paymentStatus: 'PAID',
       });
       await this.ticketRepo.appendConversationTurn(
         ticketId,
         'system',
         `Policy renewal confirmed and bound in force via Stripe payment.`
       );
+      try {
+        context = await this.ticketRepo.getTicketContext(ticketId);
+      } catch (err: any) {
+        console.warn(`[payment] Could not load ticket context: ${err.message}`);
+      }
     }
 
     return {
       status: isPaid ? 'paid' : 'pending',
       ticketId,
       checkoutSessionId: input.checkoutSessionId,
+      context,
     };
   }
 }
