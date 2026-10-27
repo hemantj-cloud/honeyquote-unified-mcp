@@ -97,7 +97,7 @@ export class PaymentTools {
 
     if (result.status !== 'paid') {
       return {
-        userFacing: 'Payment is still processing — I will confirm the moment Stripe reports it.',
+        userFacing: '',
         preventFollowUp: true,
         internal: {
           paid: false,

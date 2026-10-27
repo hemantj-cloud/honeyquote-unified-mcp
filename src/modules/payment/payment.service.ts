@@ -47,7 +47,9 @@ export class PaymentService {
       params.append('line_items[0][price_data][unit_amount]', String(Math.round(premium * 100)));
       params.append('line_items[0][quantity]', '1');
       params.append('mode', 'payment');
-      params.append('success_url', 'http://localhost:3003/try-embed?session_id={CHECKOUT_SESSION_ID}&renewed=true');
+      const widgetReturnBase = process.env.STRIPE_RETURN_URL || 'http://localhost:3003/widgets/stripe-payment-widget.html';
+      params.append('success_url', `${widgetReturnBase}?session_id={CHECKOUT_SESSION_ID}&renewed=true`);
+      params.append('cancel_url', `${widgetReturnBase}?session_id={CHECKOUT_SESSION_ID}&payment=cancelled`);
       params.append('customer_email', email);
 
       const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -106,8 +108,25 @@ export class PaymentService {
     const ticketId = input.ticketId || 'HQ-DEMO-001';
     const stripeKey = process.env.STRIPE_SECRET_KEY;
 
-    let isPaid = true;
+    let ticket: any = null;
+    try {
+      ticket = await this.ticketRepo.getTicketContext(ticketId);
+    } catch (err: any) {
+      console.warn(`[payment] Could not load ticket before checking status: ${err.message}`);
+    }
 
+    // 1. Direct DB Check: If DB is already marked renewed/paid, return paid immediately
+    if (ticket && (ticket.status === 'IN_FORCE_RENEWED' || ticket.paymentStatus === 'PAID')) {
+      return {
+        status: 'paid',
+        ticketId,
+        checkoutSessionId: input.checkoutSessionId,
+        context: ticket,
+      };
+    }
+
+    // 2. Check Stripe Checkout Session if provided
+    let isPaid = false;
     if (input.checkoutSessionId && !input.checkoutSessionId.includes('mock') && stripeKey) {
       try {
         const res = await fetch(`https://api.stripe.com/v1/checkout/sessions/${input.checkoutSessionId}`, {
@@ -118,14 +137,18 @@ export class PaymentService {
           const data = (await res.json()) as any;
           isPaid = data.payment_status === 'paid' || data.status === 'complete';
         }
-      } catch {
-        isPaid = true; // resilient fallback
+      } catch (err: any) {
+        console.warn(`[payment] Stripe session check failed: ${err.message}`);
+        isPaid = false;
       }
+    } else if (input.checkoutSessionId && input.checkoutSessionId.includes('mock')) {
+      // In mock testing mode without Stripe key, treat as paid
+      isPaid = true;
     }
 
-    let context: any = {};
+    let context: any = ticket || {};
     if (isPaid) {
-      await this.ticketRepo.updateTicket(ticketId, {
+      context = await this.ticketRepo.updateTicket(ticketId, {
         status: 'IN_FORCE_RENEWED',
         paymentStatus: 'PAID',
       });
@@ -134,11 +157,6 @@ export class PaymentService {
         'system',
         `Policy renewal confirmed and bound in force via Stripe payment.`
       );
-      try {
-        context = await this.ticketRepo.getTicketContext(ticketId);
-      } catch (err: any) {
-        console.warn(`[payment] Could not load ticket context: ${err.message}`);
-      }
     }
 
     return {

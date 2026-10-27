@@ -56,17 +56,33 @@ export default function StripePayButtonWidget() {
   const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | 'error'>('pending');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Self-close after a short beat so the user sees the confirmation first.
+  // Self-close the tab upon returning from Stripe Checkout.
+  // Browsers allow scripts to close a window if it was opened by script or
+  // if window.open('', '_self') claims the window.
   useEffect(() => {
     if (!isReturnLanding) return;
-    const t = setTimeout(() => {
+
+    const attemptClose = () => {
       try {
         window.close();
-      } catch {
-        // Non-script-opened tab — the receipt text tells them to close it.
-      }
-    }, 1200);
-    return () => clearTimeout(t);
+      } catch {}
+      try {
+        window.open('', '_self');
+        window.close();
+      } catch {}
+    };
+
+    // Try immediately
+    attemptClose();
+
+    // Also try on a short timer in case DOM wasn't fully loaded
+    const t1 = setTimeout(attemptClose, 500);
+    const t2 = setTimeout(attemptClose, 1500);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, [isReturnLanding]);
 
   // Poll the servicing API until the checkout session reports paid.
@@ -82,11 +98,11 @@ export default function StripePayButtonWidget() {
       }
       try {
         let data: any = null;
-        const isRemoteApi =
-          workflowApiUrl.startsWith('http') && !workflowApiUrl.includes(':3012');
-        if (isRemoteApi) {
-          // Deployed app exposes tools only via POST /mcp (JSON-RPC); /api/tools is internal.
-          const resp = await fetch(`${workflowApiUrl.replace(/\/$/, '')}/mcp`, {
+
+        // Poll server silently via direct HTTP to avoid spamming chat messages during polling
+        const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
+        try {
+          const resp = await fetch(mcpEndpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -99,44 +115,35 @@ export default function StripePayButtonWidget() {
               },
             }),
           });
-          if (!resp.ok) return;
-          const payload = await resp.json();
-          const text = payload?.result?.content?.[0]?.text;
-          if (text) {
-            try {
-              const parsed = JSON.parse(text);
-              data = parsed.result || parsed;
-            } catch {
-              data = null;
+          if (resp.ok) {
+            const payload = await resp.json();
+            const text = payload?.result?.content?.[0]?.text;
+            if (text) {
+              try {
+                const parsed = JSON.parse(text);
+                data = parsed.result || parsed;
+              } catch {
+                data = null;
+              }
+            } else {
+              data = payload?.result || payload;
             }
-          } else {
-            data = payload?.result || payload;
           }
-        } else {
-          // Local servicing API (Express) exposes POST /api/tools/:name directly.
-          const resp = await fetch(`${workflowApiUrl}/api/tools/hq_stripe_payment_status`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ checkoutSessionId, ticketId }),
-          });
-          if (!resp.ok) return;
-          const payload = await resp.json();
-          data = payload?.result || payload;
+        } catch (fetchErr) {
+          console.warn('[stripe-widget] Silent status poll fetch error:', fetchErr);
         }
-        if (data?.status === 'paid' || data?.internal?.paid === true || data?.internal?.status === 'IN_FORCE_RENEWED') {
+
+        const isPaid =
+          data?.status === 'paid' ||
+          data?.internal?.paid === true ||
+          data?.internal?.status === 'IN_FORCE_RENEWED';
+
+        if (isPaid) {
           setPaymentStatus('paid');
           if (pollRef.current) clearInterval(pollRef.current);
-          try {
-            const openaiSdk = (window as any).openai;
-            if (typeof openaiSdk?.callTool === 'function') {
-              openaiSdk.callTool('hq_stripe_payment_status', { checkoutSessionId, ticketId });
-            }
-          } catch {
-            // Chat confirmation message is best-effort; widget state is authoritative.
-          }
         }
       } catch {
-        // Transient network error — keep polling.
+        // Transient error — keep polling.
       }
     }, 5000);
     return () => {
@@ -244,11 +251,30 @@ export default function StripePayButtonWidget() {
           >
             {isCancelledReturn ? 'Payment cancelled' : 'Payment complete'}
           </div>
-          <div style={{ fontSize: '13px', color: textSecondary, lineHeight: 1.5 }}>
+          <div style={{ fontSize: '13px', color: textSecondary, lineHeight: 1.5, marginBottom: '20px' }}>
             {isCancelledReturn
-              ? 'No charge was made. You can close this tab and return to your chat to try again.'
-              : 'Your policy renewal is being bound. This tab will close automatically — your chat already shows the confirmed renewal.'}
+              ? 'No charge was made. You can close this tab and return to your chat.'
+              : 'Your policy renewal is confirmed! Closing this tab and returning to your chat...'}
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              try { window.close(); } catch {}
+              try { window.open('', '_self'); window.close(); } catch {}
+            }}
+            style={{
+              padding: '10px 20px',
+              borderRadius: '8px',
+              background: '#0F533A',
+              color: '#FFFFFF',
+              border: 'none',
+              fontWeight: 600,
+              fontSize: '14px',
+              cursor: 'pointer',
+            }}
+          >
+            Close Tab
+          </button>
         </div>
       </div>
     );
