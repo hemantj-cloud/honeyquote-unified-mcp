@@ -13,6 +13,7 @@
     "install:all": "nitrostack-cli install",
     "widget": "npm --prefix src/widgets",
     "widgets:serve": "node ./scripts/serve-widget-dev.mjs",
+    "seed": "tsx scripts/seed.ts",
     "test:tools": "tsx scripts/test-all-16-tools.ts",
     "test:smoke": "tsx scripts/smoke-test-tools.ts",
     "test:otp": "node ./scripts/test_otp_flow.mjs",

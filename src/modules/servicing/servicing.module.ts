@@ -10,8 +10,8 @@ import { IntegrationsModule } from '../integrations/integrations.module.js';
   name: 'servicing',
   description: 'Zero-trust OTP verification, policy inspection, servicing checklist, and COI delivery',
   imports: [PersistenceModule, IntegrationsModule],
-  controllers: [ServicingTools],
-  providers: [ServicingService, ServicingAuthService, ServicingPrompts],
+  controllers: [ServicingTools, ServicingPrompts],
+  providers: [ServicingService, ServicingAuthService],
   exports: [ServicingService, ServicingAuthService],
 })
 export class ServicingModule {}

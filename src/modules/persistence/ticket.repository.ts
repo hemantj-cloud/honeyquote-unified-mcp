@@ -33,6 +33,58 @@ export class TicketRepository {
     return this.getFallbackTicket(id);
   }
 
+  async findTicketByIdentifier(identifier: string): Promise<SeedTicketContext | null> {
+    const raw = String(identifier || '').trim();
+    if (!raw) return null;
+    const norm = raw.toLowerCase();
+    const digits = norm.replace(/\D/g, '');
+
+    if (this.mongoService?.isOnline()) {
+      try {
+        const col = this.mongoService.getCollection('tickets');
+        if (col) {
+          const conditions: any[] = [
+            { recipientEmail: norm },
+            { customerEmail: norm },
+            { customerPhone: raw },
+            { customerPhone: norm },
+          ];
+          if (digits.length >= 10) {
+            conditions.push({ customerPhone: { $regex: digits.slice(-10) } });
+          }
+          const doc = await col.findOne({ $or: conditions });
+          if (doc) {
+            const merged = { ...this.getFallbackTicket(doc.ticketId || 'HQ-DEMO-001'), ...doc } as SeedTicketContext;
+            this.memoryStore.set(merged.ticketId, merged);
+            return merged;
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[repository] Error finding ticket by identifier ${identifier}: ${err.message}`);
+      }
+    }
+
+    for (const ticket of this.memoryStore.values()) {
+      if (
+        ticket.recipientEmail?.toLowerCase() === norm ||
+        ticket.customerPhone === raw ||
+        (digits.length >= 10 && ticket.customerPhone?.replace(/\D/g, '').includes(digits.slice(-10)))
+      ) {
+        return ticket;
+      }
+    }
+
+    const defaultTicket = this.getFallbackTicket('HQ-DEMO-001');
+    if (
+      defaultTicket.recipientEmail?.toLowerCase() === norm ||
+      (digits.length >= 10 && defaultTicket.customerPhone?.replace(/\D/g, '').includes(digits.slice(-10)))
+    ) {
+      return defaultTicket;
+    }
+
+    return null;
+  }
+
   async updateTicket(ticketId: string, updates: Partial<SeedTicketContext>): Promise<SeedTicketContext> {
     const id = ticketId || 'HQ-DEMO-001';
     const current = await this.getTicketContext(id);

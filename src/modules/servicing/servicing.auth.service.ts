@@ -1,6 +1,7 @@
 import { Injectable } from '@nitrostack/core';
 import { OtpChallenge } from './servicing.types.js';
 import { ServicingService } from './servicing.service.js';
+import { TicketRepository } from '../persistence/ticket.repository.js';
 
 interface AuthenticatedSession {
   sessionId: string;
@@ -11,7 +12,7 @@ interface AuthenticatedSession {
   policyIntroductionPending: boolean;
 }
 
-@Injectable({ deps: [ServicingService] })
+@Injectable({ deps: [ServicingService, TicketRepository] })
 export class ServicingAuthService {
   // Shared static challenge and session storage across stateless MCP tool requests
   private static challenges = new Map<string, OtpChallenge>();
@@ -33,7 +34,10 @@ export class ServicingAuthService {
   private twilioServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID || '';
   private defaultPhone = process.env.TWILIO_DEFAULT_PHONE || process.env.DEFAULT_CUSTOMER_PHONE || '';
 
-  constructor(private readonly servicingService?: ServicingService) {
+  constructor(
+    private readonly servicingService?: ServicingService,
+    private readonly ticketRepo?: TicketRepository
+  ) {
     const envCodes = (process.env.VALID_OTP_CODES || '')
       .split(',')
       .map((c) => c.trim())
@@ -154,6 +158,21 @@ export class ServicingAuthService {
     const norm = this.normalizeIdentifier(rawId);
     const channel: 'email' | 'sms' = this.isEmail(norm) ? 'email' : 'sms';
 
+    let resolvedTicketId = ticketId;
+    let resolvedCustomerName = customerName;
+
+    if (this.ticketRepo) {
+      try {
+        const found = await this.ticketRepo.findTicketByIdentifier(rawId);
+        if (found) {
+          resolvedTicketId = found.ticketId;
+          resolvedCustomerName = found.customerName;
+        }
+      } catch (err) {
+        console.warn('[auth] Error matching ticket by identifier:', err);
+      }
+    }
+
     // Assign 6-digit production code rotating through the pool
     const code = this.validOtpCodes[this.challengeRotationIndex % this.validOtpCodes.length] || '489923';
     this.challengeRotationIndex = (this.challengeRotationIndex + 1) % this.validOtpCodes.length;
@@ -163,8 +182,8 @@ export class ServicingAuthService {
     const challenge: OtpChallenge = {
       identifier: norm,
       code,
-      ticketId,
-      customerName,
+      ticketId: resolvedTicketId,
+      customerName: resolvedCustomerName,
       expiresAt,
       channel,
     };
@@ -178,7 +197,7 @@ export class ServicingAuthService {
     }
     ServicingAuthService.lastChallenge = challenge;
 
-    return { code, expiresAt, identifier: norm, channel, ticketId, customerName };
+    return { code, expiresAt, identifier: norm, channel, ticketId: resolvedTicketId, customerName: resolvedCustomerName };
   }
 
   /**
@@ -314,8 +333,23 @@ export class ServicingAuthService {
       return { verified: false, error: 'The 6-digit verification code entered is invalid or expired. Please check your SMS and try again.' };
     }
 
-    const ticketId = apiTicketId || challenge?.ticketId || 'HQ-DEMO-001';
-    const customerName = challenge?.customerName || 'Jordan Mitchell';
+    let ticketId = apiTicketId || challenge?.ticketId;
+    let customerName = challenge?.customerName;
+
+    if ((!ticketId || ticketId === 'HQ-DEMO-001') && this.ticketRepo) {
+      try {
+        const found = await this.ticketRepo.findTicketByIdentifier(norm);
+        if (found) {
+          ticketId = found.ticketId;
+          customerName = found.customerName;
+        }
+      } catch (err) {
+        console.warn('[auth] Error finding ticket during verifyOtp:', err);
+      }
+    }
+
+    ticketId = ticketId || 'HQ-DEMO-001';
+    customerName = customerName || 'Jordan Mitchell';
 
     const session: AuthenticatedSession = {
       sessionId,

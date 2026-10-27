@@ -134,12 +134,10 @@ export class ServicingTools {
   })
   @Widget(POLICY_WIDGET)
   async getPolicyDetails(input: GetPolicyDetailsInput, _ctx: ExecutionContext) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
-
-    if (!this.authService.isSessionAuthenticated() && ticketId !== 'HQ-DEMO-001') {
+    if (!this.authService.isSessionAuthenticated()) {
       return {
         userFacing:
-          'For your security, I cannot disclose personal policy information until your identity is verified. Please provide your email address or phone number so I can send a verification code.',
+          'For your security, I cannot disclose personal policy information until your identity is verified. Please provide your mobile number or email address so I can send a verification code.',
         internal: {
           authenticated: false,
           error: 'UNAUTHENTICATED_SESSION',
@@ -148,6 +146,7 @@ export class ServicingTools {
       };
     }
 
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const context = await this.servicingService.getTicketContext(ticketId);
     const renewal = this.servicingService.getRenewalInvitation(context);
 
@@ -205,12 +204,10 @@ export class ServicingTools {
   })
   @Widget(POLICY_WIDGET)
   async getPendingTasks(input: GetPendingTasksInput, _ctx: ExecutionContext) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
-
-    if (!this.authService.isSessionAuthenticated() && ticketId !== 'HQ-DEMO-001') {
+    if (!this.authService.isSessionAuthenticated()) {
       return {
         userFacing:
-          'For your security, identity verification is required before checking pending servicing tasks. Please provide your email address or phone number to receive a verification code.',
+          'For your security, identity verification is required before checking pending servicing tasks. Please provide your mobile number or email address to receive a verification code.',
         internal: {
           authenticated: false,
           error: 'UNAUTHENTICATED_SESSION',
@@ -218,6 +215,8 @@ export class ServicingTools {
         },
       };
     }
+
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
 
     const context = await this.servicingService.getTicketContext(ticketId);
     const taskSummary = this.servicingService.formatPendingTasks(context);
@@ -263,13 +262,25 @@ export class ServicingTools {
   @Tool({
     name: 'get_renewal_property_details',
     description:
-      'Retrieves on-record home details for an authenticated renewal. Call once for typed renewal intent; the Renew Policy widget already invokes it directly.',
+      'Retrieves on-record home details for an authenticated renewal. Requires verified session. Call once for typed renewal intent; the Renew Policy widget already invokes it directly.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Verified session ticket ID (e.g. HQ-DEMO-001)'),
     }),
   })
   async getRenewalPropertyDetails(input: { ticketId?: string }, _ctx: ExecutionContext) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
+    if (!this.authService.isSessionAuthenticated()) {
+      return {
+        userFacing:
+          'For your security, identity verification is required before accessing policy renewal details. Please provide your mobile number or email to verify your identity.',
+        internal: {
+          authenticated: false,
+          error: 'UNAUTHENTICATED_SESSION',
+          nextTool: 'send_customer_otp',
+        },
+      };
+    }
+
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const context = await this.servicingService.getTicketContext(ticketId);
 
     const attrs = {
@@ -328,7 +339,7 @@ export class ServicingTools {
     input: { ticketId?: string; email?: string },
     _ctx: ExecutionContext
   ) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const context = await this.servicingService.getTicketContext(ticketId);
     const targetEmail = input.email || context.recipientEmail || 'hemantj@wekancode.com';
 
@@ -363,7 +374,7 @@ export class ServicingTools {
   @Tool({
     name: 'hq_docusign_send',
     description:
-      'Sends the DocuSign renewal-document signing request to the customer. Call when the customer asks for the signing link or replies yes after being offered it.',
+      'Sends the DocuSign renewal-document signing request to the customer. NEVER call this tool autonomously. Call only when the customer explicitly asks for the signing link or to sign.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Policy servicing ticket ID (default HQ-DEMO-001)'),
       recipientEmail: z.string().optional().describe('Customer email for the signing request'),
@@ -377,7 +388,10 @@ export class ServicingTools {
     input: { ticketId?: string; recipientEmail?: string; delivery?: 'direct' | 'sms' },
     _ctx: ExecutionContext
   ) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
+    if (!this.authService.isSessionAuthenticated()) {
+      return { success: false, userFacing: 'Please verify your identity before requesting document signatures.', internal: { success: false } };
+    }
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const result = await this.servicingService.docusignSend({
       ticketId,
       delivery: input.delivery || 'direct',
@@ -397,11 +411,14 @@ export class ServicingTools {
 
   @Tool({
     name: 'hq_docusign_status',
-    description: 'Refresh verified document signature status. Sent does not mean signed.',
+    description: 'Check document signature status. NEVER call this tool autonomously or in a loop. Only call when the customer explicitly asks to verify or check signature status.',
     inputSchema: z.object({ ticketId: z.string().optional() }),
   })
   async docusignStatus(input: { ticketId?: string }, _ctx: ExecutionContext) {
-    const ticketId = input.ticketId || this.authService.getVerifiedTicketId() || 'HQ-DEMO-001';
+    if (!this.authService.isSessionAuthenticated()) {
+      return { success: false, userFacing: 'Please verify your identity before checking document status.', internal: { success: false } };
+    }
+    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
     const result = await this.servicingService.docusignStatus(ticketId);
     return {
       success: result.ok,
