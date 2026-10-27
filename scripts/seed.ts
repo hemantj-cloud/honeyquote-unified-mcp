@@ -109,6 +109,10 @@ async function seed() {
     await db.collection('outbox').deleteMany({ ticketId: t.ticketId });
     await db.collection('conversations').deleteMany({ ticketId: t.ticketId });
     await db.collection('activity').deleteMany({ ticketId: t.ticketId });
+    await db.collection('signingLinks').deleteMany({ ticketId: t.ticketId });
+    await db.collection('hitl_tasks').deleteMany({ ticketId: t.ticketId });
+    await db.collection('tasks').deleteMany({ ticketId: t.ticketId });
+    await db.collection('otp_challenges').deleteMany({ identifier: t.customerPhone });
   }
 
   const seeded = await db

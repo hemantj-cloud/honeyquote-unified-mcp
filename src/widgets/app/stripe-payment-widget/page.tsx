@@ -41,7 +41,7 @@ export default function StripePayButtonWidget() {
     sdkOutput?.workflowApiUrl ||
     (typeof window !== 'undefined' && window.location.hostname.includes('nitrocloud.ai')
       ? 'https://hq-workflow-6adb190c-abhijits-org-33666fb0.app.nitrocloud.ai'
-      : 'http://localhost:3012');
+      : 'http://localhost:3000');
 
   // Stripe Checkout redirects back to this same page after payment. Detect the
   // return params, show a receipt, and self-close — the tab was script-opened
@@ -123,10 +123,10 @@ export default function StripePayButtonWidget() {
                 const parsed = JSON.parse(text);
                 data = parsed.result || parsed;
               } catch {
-                data = null;
+                data = payload?.result?.structuredContent || payload?.result;
               }
             } else {
-              data = payload?.result || payload;
+              data = payload?.result?.structuredContent || payload?.result || payload;
             }
           }
         } catch (fetchErr) {
@@ -136,7 +136,8 @@ export default function StripePayButtonWidget() {
         const isPaid =
           data?.status === 'paid' ||
           data?.internal?.paid === true ||
-          data?.internal?.status === 'IN_FORCE_RENEWED';
+          data?.internal?.status === 'IN_FORCE_RENEWED' ||
+          data?.paid === true;
 
         if (isPaid) {
           setPaymentStatus('paid');

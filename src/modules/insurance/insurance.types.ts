@@ -2,11 +2,11 @@
 import { z } from "@nitrostack/core";
 
 export const swarmValuationPropertyAttributesSchema = z.object({
-  YearBuilt: z.number().int().positive(),
-  LivingArea: z.number().int().positive(),
+  YearBuilt: z.number().int().min(1),
+  LivingArea: z.number().int().min(1),
   type_Dwelling: z.number().int(),
-  NumberOfStories: z.number().int().positive(),
-  YearRoofUpdated: z.number().int().positive(),
+  NumberOfStories: z.number().int().min(1),
+  YearRoofUpdated: z.number().int().min(1),
   type_RoofingMaterial: z.number().int(),
   type_Roof: z.number().int(),
   type_Construction: z.number().int(),
