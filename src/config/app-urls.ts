@@ -14,7 +14,16 @@ export function resolveWorkflowApiUrl(): string {
 
 /** Public HTTPS origin of this app; DocuSign returns the signer here. */
 export function resolveSigningPublicUrl(): string {
-  return (process.env.HQ_SIGNING_PUBLIC_URL || process.env.APP_URL || resolveWorkflowApiUrl()).replace(/\/$/, '');
+  const fallback = (process.env.APP_URL || resolveWorkflowApiUrl()).replace(/\/$/, '');
+  const configured = process.env.HQ_SIGNING_PUBLIC_URL?.trim().replace(/\/$/, '');
+  if (!configured) return fallback;
+  try {
+    // The workflow repo's URL belongs to a different deployment and has no signing routes here.
+    if (new URL(configured).hostname.startsWith('hq-workflow-')) return fallback;
+  } catch {
+    return fallback;
+  }
+  return configured;
 }
 
 export function toOrigin(url: string | undefined): string | null {

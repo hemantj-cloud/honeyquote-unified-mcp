@@ -72,7 +72,12 @@ export default function PolicyServicingWidget() {
     if (!el) return;
     let lastHeight = -1;
     const notifyHeight = () => {
-      const height = isUnauthenticated ? 0 : Math.max(el.scrollHeight + 28, 370);
+      const contentHeight = Math.max(
+        el.scrollHeight,
+        document.documentElement?.scrollHeight || 0,
+        document.body?.scrollHeight || 0
+      );
+      const height = isUnauthenticated ? 0 : Math.max(contentHeight + 16, 370);
       if (height === lastHeight) return;
       lastHeight = height;
       window.parent.postMessage(
@@ -926,7 +931,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
               gap: '12px',
               marginBottom: '16px',
             }}
@@ -1247,7 +1252,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               paddingLeft: '18px',
               fontSize: '12.5px',
               color: colors.textPrimary,
-              lineHeight: 1.9,
+              lineHeight: 1.55,
             }}
           >
             <li><strong>Property Address:</strong> {confirmationAddress || 'Not available on record'}</li>
@@ -1266,21 +1271,6 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               </li>
             ) : null}
           </ul>
-          <div
-            style={{
-              marginTop: '12px',
-              padding: '10px 14px',
-              borderRadius: '10px',
-              background: colors.stripBg,
-              border: `1px solid ${colors.border}`,
-              fontSize: '12.5px',
-              fontWeight: 600,
-              color: '#276152',
-              textAlign: 'center',
-            }}
-          >
-            Are these details still accurate? Reply <strong>yes</strong> in the chat to continue to secure checkout.
-          </div>
         </div>
       )}
 

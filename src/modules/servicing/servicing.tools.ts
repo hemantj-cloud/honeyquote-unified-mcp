@@ -169,7 +169,9 @@ export class ServicingTools {
     }Here are your policy details and coverage limits for your home. You can review everything in the card below.`;
 
     return {
-      userFacing: [introduction, renewal.renewalInvitation].filter(Boolean).join('\n\n'),
+      userFacing: introduction,
+      // NitroChat renders this field under the card, after the widget.
+      ...(renewal.renewalInvitation ? { renewalInvitation: renewal.renewalInvitation } : {}),
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
@@ -223,7 +225,8 @@ export class ServicingTools {
     );
 
     return {
-      userFacing: [taskSummary, renewal.renewalInvitation].filter(Boolean).join('\n\n'),
+      userFacing: taskSummary,
+      ...(renewal.renewalInvitation ? { renewalInvitation: renewal.renewalInvitation } : {}),
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
@@ -347,6 +350,9 @@ export class ServicingTools {
 
     return {
       userFacing,
+      // NitroChat renders this under the card, after the widget.
+      renewalInvitation:
+        'Are these details still accurate? Reply **yes** in the chat to continue to secure checkout.',
       preventFollowUp: true,
       internal: {
         stage: 'awaiting_property_confirmation',
@@ -454,12 +460,20 @@ export class ServicingTools {
         internal: { ...result, success: true },
       };
     } catch (err: any) {
-      console.error('[signing] prepareSignature failed:', err?.message || err);
+      const reason = String(err?.message || err);
+      console.error('[signing] prepareSignature failed:', reason);
+      const userFacing = /not found/i.test(reason)
+        ? "I couldn't find the renewal document to sign. Please try again in a moment."
+        : /not configured/i.test(reason)
+          ? "Signing isn't configured on the server yet. Please try again in a moment."
+          : /authentication failed/i.test(reason)
+            ? "DocuSign didn't accept the signing credentials. Please try again in a moment."
+            : "I couldn't prepare your signing document right now. Please try again in a moment.";
       return {
         success: false,
         preventFollowUp: true,
-        userFacing: "I couldn't prepare your signing document right now. Please try again in a moment.",
-        internal: { success: false, ok: false, error: String(err?.message || err) },
+        userFacing,
+        internal: { success: false, ok: false, error: reason },
       };
     }
   }

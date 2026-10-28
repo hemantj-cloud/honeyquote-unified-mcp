@@ -142,12 +142,17 @@ export class SigningService {
   }
 
   private policyPdfPath(documentId: string): string | null {
-    const configured = process.env.HQ_POLICY_PDF_DIR?.trim() || 'policy-documents';
-    const dirs = path.isAbsolute(configured)
-      ? [configured]
-      : [path.resolve(process.cwd(), configured), path.resolve(PROJECT_ROOT, configured)];
-    const dir = dirs.find((d) => fs.existsSync(path.join(d, `${documentId}.pdf`)));
-    return dir ? path.join(dir, `${documentId}.pdf`) : null;
+    const names = [process.env.HQ_POLICY_PDF_DIR?.trim(), 'policy-documents'].filter((name): name is string =>
+      Boolean(name)
+    );
+    for (const name of names) {
+      const dirs = path.isAbsolute(name)
+        ? [name]
+        : [path.resolve(process.cwd(), name), path.resolve(PROJECT_ROOT, name)];
+      const file = dirs.map((dir) => path.join(dir, `${documentId}.pdf`)).find((candidate) => fs.existsSync(candidate));
+      if (file) return file;
+    }
+    return null;
   }
 
   hasPolicyDocument(documentId = process.env.HQ_RENEWAL_DOCUMENT_ID || DEFAULT_RENEWAL_DOCUMENT_ID): boolean {
