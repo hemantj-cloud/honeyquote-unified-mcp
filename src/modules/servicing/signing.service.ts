@@ -70,10 +70,16 @@ export class SigningService {
 
   private chatLink(ticketId: string): string | null {
     const raw = process.env.HQ_CHAT_RETURN_URL?.trim();
-    if (!raw) return null;
+    const appOrigin = resolveSigningPublicUrl();
     try {
-      const url = new URL(raw);
-      if (url.protocol !== 'https:') return null;
+      const url = raw ? new URL(raw) : new URL('/embed', appOrigin);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+      // DocuSign must land on this MCP app. A NitroChat host has no /signing/return.
+      if (url.hostname.startsWith('nitrochat-') || url.hostname.startsWith('hq-workflow-')) {
+        const fallback = new URL(url.pathname + url.search, appOrigin);
+        fallback.searchParams.set('conversationId', `CONV-${ticketId}`);
+        return fallback.href;
+      }
       url.searchParams.set('conversationId', `CONV-${ticketId}`);
       return url.href;
     } catch {

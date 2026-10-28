@@ -62,6 +62,13 @@
       "description": "Interactive Stripe payment card and policy binding confirmation widget",
       "examples": [],
       "tags": ["insurance", "payment", "stripe", "renewal", "checkout"]
+    },
+    {
+      "uri": "/signing-widget",
+      "name": "DocuSign Renewal Signing",
+      "description": "Opens the renewal document signing link, the same way checkout opens Stripe",
+      "examples": [],
+      "tags": ["insurance", "signing", "docusign", "renewal"]
     }
   ],
   "generatedAt": "2026-10-21T00:00:00.000Z"

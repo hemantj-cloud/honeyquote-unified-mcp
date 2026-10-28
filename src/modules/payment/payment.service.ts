@@ -38,7 +38,7 @@ export class PaymentService {
     customerEmail: string;
     ticketId: string;
   }> {
-    const ticketId = input.ticketId || 'HQ-DEMO-001';
+    const ticketId = input.ticketId || 'HQ-DEMO-002';
     const ticket = await this.ticketRepo.getTicketContext(ticketId);
 
     // A same-carrier renewal passes no carrier/premium: price it from the ticket on record.
@@ -48,8 +48,8 @@ export class PaymentService {
       (ticket.renewalPremium && toCarrierDisplayName(ticket.renewalCarrier) === carrier
         ? ticket.renewalPremium
         : DEFAULT_RENEWAL_PREMIUM);
-    const policyNumber = input.policyNumber || ticket.policyNumber || 'HQ-POL-88421';
-    const email = input.customerEmail || ticket.recipientEmail || 'hemantj@wekancode.com';
+    const policyNumber = input.policyNumber || ticket.policyNumber || 'HQ-POL-88422';
+    const email = input.customerEmail || ticket.recipientEmail || 'navarathinamc@wekancode.com';
 
     // The new term starts where the current one ends; applied once payment completes.
     const pendingEffectiveDate = ticket.renewalDate;
@@ -74,7 +74,7 @@ export class PaymentService {
       params.append('line_items[0][quantity]', '1');
       params.append('mode', 'payment');
       const isRunningInCloud = Boolean(process.env.NITRO_APP_URL || process.env.KUBERNETES_SERVICE_HOST || process.env.NITROCLOUD);
-      const defaultHost = process.env.APP_URL || (process.env.NITRO_APP_URL ? `https://${process.env.NITRO_APP_URL}` : (isRunningInCloud ? 'https://hq-chat-6ae0c37c-hemants-org-d233dcd8.app.nitrocloud.ai' : 'http://localhost:3000'));
+      const defaultHost = process.env.APP_URL || (process.env.NITRO_APP_URL ? `https://${process.env.NITRO_APP_URL}` : (isRunningInCloud ? 'https://honeyquote-chatapp-6ae1ced1-abhijits-org-33666fb0.app.nitrocloud.ai' : 'http://localhost:3000'));
       const widgetReturnBase = process.env.STRIPE_RETURN_URL || `${defaultHost.replace(/\/$/, '')}/widgets/stripe-payment-widget.html`;
       const ticketParam = `ticket_id=${encodeURIComponent(ticketId)}`;
       params.append('success_url', `${widgetReturnBase}?session_id={CHECKOUT_SESSION_ID}&renewed=true&${ticketParam}`);

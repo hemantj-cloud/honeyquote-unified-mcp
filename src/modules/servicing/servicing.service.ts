@@ -1,7 +1,30 @@
 import { Injectable } from '@nitrostack/core';
 import { TicketRepository } from '../persistence/ticket.repository.js';
 import { EmailService } from '../integrations/email.service.js';
+import type { UploadedDocumentRecord } from '../persistence/seed-data.js';
 import type { HqTicketContext } from './servicing.types.js';
+
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'png', 'jpg', 'jpeg']);
+const ALLOWED_CONTENT_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'image/png',
+  'image/jpeg',
+  'application/octet-stream',
+]);
+
+export interface DocumentUploadResult {
+  ok: boolean;
+  statusCode: number;
+  error?: string;
+  ticketId: string;
+  documentStatus: 'OPEN' | 'COMPLETE';
+  missingDocuments: string[];
+  uploadedDocuments: UploadedDocumentRecord[];
+  upload?: UploadedDocumentRecord;
+}
 
 @Injectable({ deps: [TicketRepository, EmailService] })
 export class ServicingService {
@@ -48,6 +71,19 @@ export class ServicingService {
       : undefined;
 
     return { daysUntilExpiry, isRenewalEligible, renewalInvitation };
+  }
+
+  /**
+   * Under-card prompt after a renewed customer verifies again and the new term
+   * still needs a signature. Sign Now on the card opens DocuSign; a yes in chat
+   * generates the link and shows the signing widget.
+   */
+  getSigningConsentInvitation(ctx: HqTicketContext): string | undefined {
+    const renewed = ctx.status === 'IN_FORCE_RENEWED' || ctx.paymentStatus === 'PAID';
+    const needsSignature = Boolean(ctx.signatureRequired) && ctx.signatureStatus !== 'signed';
+    if (!renewed || !needsSignature) return undefined;
+    const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
+    return `Hey ${firstName}, your documents need to be signed. Do you want to proceed? Please click **Sign Now** in the card, or reply **yes** and I'll generate a link to sign.`;
   }
 
   formatPolicySummary(ctx: HqTicketContext): string {
@@ -104,12 +140,18 @@ export class ServicingService {
       items.push('• E-Signature: Completed and recorded in file.');
     }
 
+    if (ctx.uploadedDocuments && ctx.uploadedDocuments.length > 0) {
+      items.push(
+        `• Uploaded documents on file: ${ctx.uploadedDocuments.map((doc) => doc.fileName).join(', ')}`
+      );
+    }
+
     if (ctx.missingDocuments && ctx.missingDocuments.length > 0) {
       const labels = ctx.missingDocuments.map((doc) => {
         const text = doc.replace(/[_-]+/g, ' ').trim();
         return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
       });
-      items.push(`• Missing Supporting Documentation: ${labels.join(', ')}`);
+      items.push(`• Supporting Documents: Open until uploaded. Missing: ${labels.join(', ')}`);
     } else {
       items.push('• Supporting Documents: All required documents have been received.');
     }
@@ -169,4 +211,142 @@ export class ServicingService {
     });
     return changed.map(([k]) => k);
   }
+
+  async supportingDocumentStatus(ticketId: string): Promise<DocumentUploadResult> {
+    const ticket = await this.getTicketContext(ticketId);
+    const missingDocuments = Array.isArray(ticket.missingDocuments) ? ticket.missingDocuments : [];
+    const uploadedDocuments = Array.isArray(ticket.uploadedDocuments) ? ticket.uploadedDocuments : [];
+    return {
+      ok: true,
+      statusCode: 200,
+      ticketId,
+      documentStatus: missingDocuments.length > 0 ? 'OPEN' : 'COMPLETE',
+      missingDocuments,
+      uploadedDocuments,
+    };
+  }
+
+  /**
+   * Supporting-document intake stays OPEN until the customer uploads a required file.
+   * A successful upload is the only path that records the file and advances status.
+   */
+  async recordSupportingDocument(input: {
+    ticketId: string;
+    fileName: unknown;
+    docType?: unknown;
+    contentType?: unknown;
+    sizeBytes?: unknown;
+  }): Promise<DocumentUploadResult> {
+    const ticketId = input.ticketId;
+    const ticket = await this.getTicketContext(ticketId);
+    const missingDocuments = Array.isArray(ticket.missingDocuments) ? [...ticket.missingDocuments] : [];
+    const uploadedDocuments = Array.isArray(ticket.uploadedDocuments) ? [...ticket.uploadedDocuments] : [];
+    const documentStatus: 'OPEN' | 'COMPLETE' = missingDocuments.length > 0 ? 'OPEN' : 'COMPLETE';
+
+    const unchanged = (): DocumentUploadResult => ({
+      ok: false,
+      statusCode: 400,
+      ticketId,
+      documentStatus,
+      missingDocuments,
+      uploadedDocuments,
+    });
+
+    if (missingDocuments.length === 0) {
+      return { ...unchanged(), statusCode: 409, error: 'No supporting document is waiting for upload.' };
+    }
+
+    const fileName = cleanFileName(input.fileName);
+    if (!fileName) {
+      return { ...unchanged(), error: 'A document file name is required.' };
+    }
+
+    const extension = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
+    if (!ALLOWED_EXTENSIONS.has(extension)) {
+      return { ...unchanged(), error: 'Upload a PDF, Word, PNG, or JPEG document.' };
+    }
+
+    const contentType = cleanContentType(input.contentType);
+    if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
+      return { ...unchanged(), error: 'That file type cannot be stored.' };
+    }
+
+    const sizeBytes = cleanSize(input.sizeBytes);
+    if (sizeBytes < 0) {
+      return { ...unchanged(), error: 'That document is too large to store.' };
+    }
+
+    const requested = String(input.docType || '').trim().toLowerCase();
+    const docType = requested
+      ? missingDocuments.find((doc) => doc.toLowerCase() === requested)
+      : missingDocuments[0];
+    if (!docType) {
+      return {
+        ...unchanged(),
+        error: 'That document is not one of the open requirements.',
+      };
+    }
+
+    const upload: UploadedDocumentRecord = {
+      docType,
+      fileName,
+      contentType,
+      sizeBytes,
+      uploadedAt: new Date().toISOString(),
+      status: 'received',
+    };
+    const remaining = missingDocuments.filter((doc) => doc !== docType);
+    const stored = [...uploadedDocuments, upload];
+    const nextStatus: 'OPEN' | 'COMPLETE' = remaining.length > 0 ? 'OPEN' : 'COMPLETE';
+
+    await this.ticketRepo.updateTicket(ticketId, {
+      missingDocuments: remaining,
+      uploadedDocuments: stored,
+      documentStatus: nextStatus,
+    });
+    await this.appendConversationTurn(
+      ticketId,
+      'system',
+      `Supporting document received: ${fileName} (${docType}). Status ${nextStatus}. Remaining: ${
+        remaining.join(', ') || 'none'
+      }.`
+    );
+
+    return {
+      ok: true,
+      statusCode: 200,
+      ticketId,
+      documentStatus: nextStatus,
+      missingDocuments: remaining,
+      uploadedDocuments: stored,
+      upload,
+    };
+  }
+}
+
+function cleanFileName(value: unknown): string | null {
+  const name = String(value || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    ?.trim() || '';
+  if (!name || name.length > 180 || /[\u0000-\u001f]/.test(name)) return null;
+  return name;
+}
+
+function cleanContentType(value: unknown): string {
+  const raw = String(value || 'application/octet-stream')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (!/^[\w.+-]+\/[\w.+-]+$/.test(raw) || raw.length > 120) return 'application/octet-stream';
+  return raw;
+}
+
+function cleanSize(value: unknown): number {
+  if (value === undefined || value === null || value === '') return 0;
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return 0;
+  if (size > MAX_UPLOAD_BYTES) return -1;
+  return Math.round(size);
 }

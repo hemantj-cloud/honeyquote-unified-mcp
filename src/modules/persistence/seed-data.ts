@@ -1,3 +1,12 @@
+export interface UploadedDocumentRecord {
+  docType: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  status: 'received';
+}
+
 export interface SeedTicketContext {
   ticketId: string;
   policyNumber: string;
@@ -40,7 +49,10 @@ export interface SeedTicketContext {
   signatureRequired: boolean;
   esignSent: boolean;
   signatureStatus: string;
+  /** OPEN until every required supporting document is stored, then COMPLETE. */
+  documentStatus?: 'OPEN' | 'COMPLETE';
   missingDocuments: string[];
+  uploadedDocuments?: UploadedDocumentRecord[];
   propertyAddress: string;
   propertyAttributes: {
     address: string;
@@ -97,7 +109,9 @@ export function getDefaultSeedTicket(): SeedTicketContext {
     signatureRequired: false,
     esignSent: true,
     signatureStatus: 'PENDING_CUSTOMER_SIGNATURE',
+    documentStatus: 'OPEN',
     missingDocuments: ['application', 'supplemental_signature_page'],
+    uploadedDocuments: [],
     propertyAddress: '1244 Ocean Drive, Miami Beach, FL 33139',
     propertyAttributes: {
       address: '1244 Ocean Drive, Miami Beach, FL 33139',
@@ -156,7 +170,9 @@ export function getHemantSeedTicket(): SeedTicketContext {
     signatureRequired: true,
     esignSent: false,
     signatureStatus: 'pending',
+    documentStatus: 'OPEN',
     missingDocuments: ['application', 'supplemental_signature_page'],
+    uploadedDocuments: [],
     propertyAddress: '2310 Coral Way, Coral Gables, FL 33145',
     propertyAttributes: {
       address: '2310 Coral Way, Coral Gables, FL 33145',

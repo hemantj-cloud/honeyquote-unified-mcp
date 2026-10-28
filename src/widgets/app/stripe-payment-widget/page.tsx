@@ -17,6 +17,31 @@ interface PaymentWidgetData {
   workflowApiUrl?: string;
 }
 
+// NitroChat hosts the widget on its own *.nitrocloud.ai origin. That host is not
+// this MCP server, so polling must use the URL the tool returns.
+const DEPLOYED_MCP_ORIGIN = 'https://honeyquote-chatapp-6ae1ced1-abhijits-org-33666fb0.app.nitrocloud.ai';
+
+function isChatHost(hostname: string): boolean {
+  return hostname.startsWith('nitrochat-');
+}
+
+function isThisMcpServer(hostname: string, port: string): boolean {
+  if (isChatHost(hostname)) return false;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return port === '3000';
+  return hostname.startsWith('honeyquote-chatapp-');
+}
+
+function mcpOriginFrom(url: string | undefined): string | null {
+  if (!url || !url.startsWith('http')) return null;
+  try {
+    const parsed = new URL(url);
+    if (isChatHost(parsed.hostname)) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
 export default function StripePayButtonWidget() {
   const { getToolOutput } = useWidgetSDK();
   const sdkOutput = getToolOutput<any>();
@@ -39,23 +64,13 @@ export default function StripePayButtonWidget() {
     typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ticket_id') : null;
   const ticketId = rawData.ticketId || returnTicketId || 'HQ-DEMO-001';
   const workflowApiUrl = (() => {
-    if (typeof window !== 'undefined') {
-      if (window.location.hostname.includes('nitrocloud.ai')) {
-        return window.location.origin;
-      }
-      try {
-        if (window.parent && window.parent.location.hostname.includes('nitrocloud.ai')) {
-          return window.parent.location.origin;
-        }
-      } catch {}
+    const fromTool = mcpOriginFrom(rawData.workflowApiUrl || sdkOutput?.workflowApiUrl);
+    if (fromTool) return fromTool;
+    // Stripe's return page is served by this MCP app and has no tool payload.
+    if (typeof window !== 'undefined' && isThisMcpServer(window.location.hostname, window.location.port)) {
+      return window.location.origin;
     }
-    const candidate = rawData.workflowApiUrl || sdkOutput?.workflowApiUrl;
-    if (candidate && candidate.startsWith('http')) {
-      return candidate;
-    }
-    return typeof window !== 'undefined' && window.location.port === '3000'
-      ? window.location.origin
-      : 'http://localhost:3000';
+    return DEPLOYED_MCP_ORIGIN;
   })();
 
   // Stripe Checkout redirects back to this same page after payment. Detect the

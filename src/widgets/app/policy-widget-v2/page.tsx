@@ -55,6 +55,15 @@ interface PolicyData {
   billedToMortgage?: boolean;
 }
 
+interface UploadedDocument {
+  docType: string;
+  fileName: string;
+  contentType?: string;
+  sizeBytes?: number;
+  uploadedAt: string;
+  status?: string;
+}
+
 export default function PolicyServicingWidget() {
   const { getToolOutput } = useWidgetSDK();
   const sdkOutput = getToolOutput<any>();
@@ -65,19 +74,36 @@ export default function PolicyServicingWidget() {
 
   const isUnauthenticated = sdkOutput?.internal?.authenticated === false;
 
+  // Extract structured internal data
+  const rawInternal = sdkOutput?.internal || sdkOutput || {};
+  const activeInternal = rawInternal;
+
+  const isPropertyConfirmation = Boolean(
+    activeInternal.awaitingPropertyConfirmation === true ||
+    activeInternal.stage === 'awaiting_property_confirmation'
+  );
+
   // Report the card's height to the NitroChat iframe whenever its content resizes (data,
   // tabs, notices, fonts), so the frame never keeps a stale, taller height.
+  // The renewal confirmation card is shorter (header + property details), so it reports
+  // its real height instead of the 370px floor used by the full policy card.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     let lastHeight = -1;
     const notifyHeight = () => {
-      const contentHeight = Math.max(
-        el.scrollHeight,
-        document.documentElement?.scrollHeight || 0,
-        document.body?.scrollHeight || 0
-      );
-      const height = isUnauthenticated ? 0 : Math.max(contentHeight + 16, 370);
+      const contentHeight = isPropertyConfirmation
+        ? el.scrollHeight
+        : Math.max(
+            el.scrollHeight,
+            document.documentElement?.scrollHeight || 0,
+            document.body?.scrollHeight || 0
+          );
+      const height = isUnauthenticated
+        ? 0
+        : isPropertyConfirmation
+          ? contentHeight + 16
+          : Math.max(contentHeight + 16, 370);
       if (height === lastHeight) return;
       lastHeight = height;
       window.parent.postMessage(
@@ -89,16 +115,8 @@ export default function PolicyServicingWidget() {
     const observer = new ResizeObserver(notifyHeight);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [isUnauthenticated]);
+  }, [isUnauthenticated, isPropertyConfirmation]);
 
-  // Extract structured internal data
-  const rawInternal = sdkOutput?.internal || sdkOutput || {};
-  const activeInternal = rawInternal;
-
-  const isPropertyConfirmation = Boolean(
-    activeInternal.awaitingPropertyConfirmation === true ||
-    activeInternal.stage === 'awaiting_property_confirmation'
-  );
   const propertyAttrs = activeInternal.propertyAttributes || {};
   const confirmationAddress = propertyAttrs.address || activeInternal.propertyAddress || activeInternal.address;
   const confirmationRoof =
@@ -175,9 +193,10 @@ export default function PolicyServicingWidget() {
     sdkOutput?.internal?.signatureRequired !== undefined ||
     sdkOutput?.internal?.missingDocuments !== undefined
   );
+  const isSignedComplete = rawInternal.presentation === 'signed';
 
   const [activeTab, setActiveTab] = useState<'coverages' | 'checklist'>(
-    (hasServicingNotification || isTasksTool) ? 'checklist' : 'coverages'
+    isSignedComplete ? 'coverages' : (hasServicingNotification || isTasksTool) ? 'checklist' : 'coverages'
   );
 
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -192,7 +211,9 @@ export default function PolicyServicingWidget() {
   );
   const isRenewed = resolvedData.status === 'IN_FORCE_RENEWED';
   const canManageSignature = !isUnauthenticated && !isRenewalWindow && (
-    (isRenewed && rawInternal.paid === true) || rawInternal.presentation === 'servicing' ||
+    (isRenewed && rawInternal.paid === true) ||
+    rawInternal.presentation === 'servicing' ||
+    rawInternal.presentation === 'signed' ||
     (!rawInternal.presentation && hasServicingNotification && !isRenewed)
   );
 
@@ -200,13 +221,24 @@ export default function PolicyServicingWidget() {
   // entirely (Ankita: warning lives on the term dates only), so never leave the
   // user stranded on a tab that isn't rendered.
   useEffect(() => {
-    if (isRenewalWindow) setActiveTab('coverages');
-  }, [isRenewalWindow]);
+    if (isRenewalWindow || isSignedComplete) setActiveTab('coverages');
+  }, [isRenewalWindow, isSignedComplete]);
 
   // Dynamic interactive states for servicing checklist & actions
   const [missingDocs, setMissingDocs] = useState<string[]>(
     resolvedData.missingDocuments || []
   );
+  const [uploadedDocs, setUploadedDocs] = useState<UploadedDocument[]>(
+    Array.isArray(rawInternal.uploadedDocuments) ? rawInternal.uploadedDocuments : []
+  );
+  const serverMissingKey = (resolvedData.missingDocuments || []).join('|');
+  const serverUploadedKey = (Array.isArray(rawInternal.uploadedDocuments) ? rawInternal.uploadedDocuments : [])
+    .map((doc: UploadedDocument) => `${doc.fileName}:${doc.uploadedAt}`)
+    .join('|');
+  useEffect(() => {
+    setMissingDocs(resolvedData.missingDocuments || []);
+    setUploadedDocs(Array.isArray(rawInternal.uploadedDocuments) ? rawInternal.uploadedDocuments : []);
+  }, [resolvedData.ticketId, serverMissingKey, serverUploadedKey]);
   const [signatureNeeded, setSignatureNeeded] = useState<boolean>(
     Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed')
   );
@@ -233,7 +265,50 @@ export default function PolicyServicingWidget() {
     setSignatureSigned(rawInternal.signatureStatus === 'signed');
     setSignatureNeeded(Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed'));
   }, [resolvedData.ticketId, resolvedData.signatureRequired, rawInternal.signatureStatus]);
-  const signingStatusUrl: string = rawInternal.signingStatusUrl || '';
+  const workflowApiUrl = (() => {
+    const candidate = sdkOutput?.workflowApiUrl || sdkOutput?.internal?.workflowApiUrl;
+    if (typeof candidate === 'string' && candidate.startsWith('http')) {
+      try {
+        const parsed = new URL(candidate);
+        if (!parsed.hostname.startsWith('nitrochat-')) return parsed.origin;
+      } catch {}
+    }
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.hostname.startsWith('honeyquote-chatapp-') ||
+        ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') &&
+          window.location.port === '3000'))
+    ) {
+      return window.location.origin;
+    }
+    return 'https://honeyquote-chatapp-6ae1ced1-abhijits-org-33666fb0.app.nitrocloud.ai';
+  })();
+  const documentUploadUrl: string = (() => {
+    const raw = String(rawInternal.documentUploadUrl || '');
+    if (!raw) return `${workflowApiUrl}/api/policy/document/upload`;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.hostname.startsWith('nitrochat-') || parsed.hostname.startsWith('hq-workflow-')) {
+        return `${workflowApiUrl}${parsed.pathname}${parsed.search}`;
+      }
+      return raw;
+    } catch {
+      return `${workflowApiUrl}/api/policy/document/upload`;
+    }
+  })();
+  const signingStatusUrl: string = (() => {
+    const raw = String(rawInternal.signingStatusUrl || '');
+    if (!raw) return `${workflowApiUrl}/signing/status`;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.hostname.startsWith('nitrochat-') || parsed.hostname.startsWith('hq-workflow-')) {
+        return `${workflowApiUrl}${parsed.pathname}${parsed.search}`;
+      }
+      return raw;
+    } catch {
+      return `${workflowApiUrl}/signing/status`;
+    }
+  })();
   const announcedRef = useRef(false);
   useEffect(() => {
     if (!canManageSignature || !signatureNeeded || !signingStatusUrl) return;
@@ -250,11 +325,13 @@ export default function PolicyServicingWidget() {
           setSignatureNeeded(false);
           setSignatureSigned(true);
           setAwaitingSignature(false);
-          setActionNotice('Document signed.');
-          // One chat-visible status call so the assistant's text matches the card.
+          setActionNotice(null);
+          // One chat-visible status call: success message plus the updated policy card.
           if (!announcedRef.current) {
             announcedRef.current = true;
-            void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {});
+            void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {
+              setActionNotice('Your renewal document has been signed successfully.');
+            });
           }
         }
       } catch {}
@@ -278,13 +355,29 @@ export default function PolicyServicingWidget() {
   const [renewalTriggered, setRenewalTriggered] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const workflowApiUrl =
-    sdkOutput?.workflowApiUrl ||
-    sdkOutput?.internal?.workflowApiUrl ||
-    (typeof window !== 'undefined' && window.location.hostname.includes('nitrocloud.ai')
-      ? 'https://code-mode-6abfd341-akfjss-org-6ab29763.app.nitrocloud.ai'
-      : 'http://localhost:3012');
+  const uploadingRef = useRef(false);
+  useEffect(() => {
+    if (activeTab !== 'checklist' || !resolvedData.ticketId) return;
+    const statusUrl = documentUploadUrl.replace(/\/upload$/, '/status');
+    let active = true;
+    const refresh = async () => {
+      if (uploadingRef.current) return;
+      try {
+        const resp = await fetch(`${statusUrl}?ticketId=${encodeURIComponent(resolvedData.ticketId || '')}`);
+        if (!resp.ok) return;
+        const result = await resp.json();
+        if (!active || uploadingRef.current || !result?.ok) return;
+        if (Array.isArray(result.missingDocuments)) setMissingDocs(result.missingDocuments);
+        if (Array.isArray(result.uploadedDocuments)) setUploadedDocs(result.uploadedDocuments);
+      } catch {}
+    };
+    void refresh();
+    window.addEventListener('focus', refresh);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refresh);
+    };
+  }, [activeTab, resolvedData.ticketId, documentUploadUrl]);
 
   const verifiedEmail =
     sdkOutput?.internal?.insuredEmail ||
@@ -339,7 +432,9 @@ export default function PolicyServicingWidget() {
     }
   };
 
-  // Handler: DocuSign Electronic Signature
+  // Handler: DocuSign Electronic Signature.
+  // Uses /signing/prepare instead of hq_docusign_send so the chat does not post
+  // "Your document is ready to sign. Click here to sign".
   const handleSignDocuSign = async () => {
     if (isSigning || !canManageSignature || (!signatureNeeded && !signatureSigned)) return;
     setIsSigning(true);
@@ -347,11 +442,27 @@ export default function PolicyServicingWidget() {
 
     try {
       const signAgain = signatureSigned === true;
-      const result = await callSigningTool('hq_docusign_send', { force: signAgain });
+      const prepareUrl = signingStatusUrl.includes('/signing/status')
+        ? signingStatusUrl.replace('/signing/status', '/signing/prepare')
+        : `${workflowApiUrl}/signing/prepare`;
+      const resp = await fetch(
+        `${prepareUrl}${prepareUrl.includes('?') ? '&' : '?'}ticketId=${encodeURIComponent(resolvedData.ticketId || '')}${signAgain ? '&force=1' : ''}`,
+        { method: 'POST' }
+      );
+      if (!resp.ok) throw new Error('Signing request failed');
+      const result = await resp.json();
+      if (result?.ok === false || result?.success === false) throw new Error('Signing request failed');
       if (result.signed) {
         setSignatureNeeded(false);
         setSignatureSigned(true);
-        setActionNotice('Document signed.');
+        setAwaitingSignature(false);
+        setActionNotice(null);
+        if (!announcedRef.current) {
+          announcedRef.current = true;
+          void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {
+            setActionNotice('Your renewal document has been signed successfully.');
+          });
+        }
         return;
       }
       if (signAgain) {
@@ -362,7 +473,8 @@ export default function PolicyServicingWidget() {
       setIsEsignSent(true);
       if (!result.signingUrl) throw new Error('No signing link returned');
       const url = new URL(result.signingUrl);
-      if (url.protocol !== 'https:') throw new Error('Invalid signing link');
+      const localHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && localHost)) throw new Error('Invalid signing link');
       const sdk = (window as any).openai;
       if (typeof sdk?.openExternal === 'function') sdk.openExternal({ href: url.href });
       else window.open(url.href, '_blank', 'noopener,noreferrer');
@@ -385,75 +497,45 @@ export default function PolicyServicingWidget() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const file = files[0];
-    const docTypeToSatisfy = missingDocs[0] || 'application';
+    const docTypeToSatisfy = missingDocs[0];
+    if (!docTypeToSatisfy) return;
 
+    uploadingRef.current = true;
     setIsUploadingDocs(true);
-    setActionNotice(`Uploading ${file.name} to Citizens underwriting intake...`);
+    setActionNotice(`Saving ${file.name}. This request stays open until it is on file...`);
 
     try {
-      let updatedRemaining: string[] | null = null;
-
-      try {
-        const resp = await fetch(`${workflowApiUrl}/api/policy/document/upload`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticketId: resolvedData.ticketId,
-            fileName: file.name,
-            docType: docTypeToSatisfy,
-          }),
-        });
-        if (resp.ok) {
-          const resData = await resp.json();
-          if (Array.isArray(resData?.missingDocuments)) {
-            updatedRemaining = resData.missingDocuments;
-          }
-        }
-      } catch {
-        // Local 3012 fallback
-        try {
-          const resp = await fetch('http://localhost:3012/api/policy/document/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ticketId: resolvedData.ticketId,
-              fileName: file.name,
-              docType: docTypeToSatisfy,
-            }),
-          });
-          if (resp.ok) {
-            const resData = await resp.json();
-            if (Array.isArray(resData?.missingDocuments)) {
-              updatedRemaining = resData.missingDocuments;
-            }
-          }
-        } catch {
-          // Non-blocking
-        }
+      const resp = await fetch(documentUploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticketId: resolvedData.ticketId,
+          fileName: file.name,
+          docType: docTypeToSatisfy,
+          contentType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+        }),
+      });
+      const resData = await resp.json().catch(() => null);
+      if (!resp.ok || !resData?.ok || !Array.isArray(resData.missingDocuments)) {
+        setActionNotice(resData?.error || `Couldn't save "${file.name}". Upload stays open until the document is stored.`);
+        return;
       }
 
-      if (updatedRemaining !== null) {
-        setMissingDocs(updatedRemaining);
-        if (updatedRemaining.length === 0) {
-          setActionNotice(`✅ "${file.name}" uploaded! All underwriting document requirements are now satisfied.`);
-        } else {
-          setActionNotice(`✅ "${file.name}" uploaded! Remaining missing: ${updatedRemaining.join(', ')}.`);
-        }
+      setMissingDocs(resData.missingDocuments);
+      if (Array.isArray(resData.uploadedDocuments)) setUploadedDocs(resData.uploadedDocuments);
+      if (resData.missingDocuments.length === 0) {
+        setActionNotice(`"${file.name}" is saved. All supporting documents are on file.`);
       } else {
-        // Fallback optimistic resolution: remove satisfied document
-        setMissingDocs((prev) => {
-          const next = prev.filter((doc) => doc !== docTypeToSatisfy);
-          return next.length === prev.length ? prev.slice(1) : next;
-        });
-        setActionNotice(`✅ "${file.name}" uploaded and filed with Citizens underwriting.`);
+        setActionNotice(
+          `"${file.name}" is saved. Still open: ${resData.missingDocuments.map(formatDocumentLabel).join(', ')}.`
+        );
       }
-
       setTimeout(() => setActionNotice(null), 6000);
     } catch {
-      setMissingDocs((prev) => prev.slice(1));
-      setActionNotice(`Document "${file.name}" received.`);
-      setTimeout(() => setActionNotice(null), 4000);
+      setActionNotice(`Couldn't save "${file.name}". Upload stays open until the document is stored.`);
     } finally {
+      uploadingRef.current = false;
       setIsUploadingDocs(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
@@ -651,7 +733,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
   return (
     <div
       ref={containerRef}
-      data-build="2026-10-26-r1"
+      data-build="2026-10-28-signed-policy"
       style={{
         width: '100%',
         maxWidth: '720px',
@@ -725,6 +807,23 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#276152' }} />
                 {isRenewed ? 'In Force (Renewed)' : 'In Force'}
               </span>
+              {(isSignedComplete || signatureSigned) && (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    padding: '3px 9px',
+                    borderRadius: '100px',
+                    background: colors.successBg,
+                    color: colors.successText,
+                    border: `1px solid ${colors.successBorder}`,
+                  }}
+                >
+                  Signed
+                </span>
+              )}
             </div>
             <div style={{ fontSize: '12.5px', color: colors.textSecondary, marginTop: '3px' }}>
               Policy: <strong style={{ color: colors.textPrimary, fontWeight: 600 }}>{resolvedData.policyNumber}</strong> • Ticket: {resolvedData.ticketId}
@@ -757,6 +856,31 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           </div>
         </div>
       </div>
+
+      {(isSignedComplete || (signatureSigned && !signatureNeeded)) && (
+        <div
+          style={{
+            background: colors.successBg,
+            border: `1px solid ${colors.successBorder}`,
+            borderRadius: '12px',
+            padding: '12px 16px',
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+          }}
+        >
+          <span style={{ fontSize: '18px' }}>✅</span>
+          <div>
+            <div style={{ fontSize: '13.5px', fontWeight: 700, color: colors.successText }}>
+              Renewal document signed
+            </div>
+            <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
+              Signature is on file for this term.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Expiration Alert Banner: dynamically rendered when policy expires within renewal window (<= 30 days) */}
       {isRenewalWindow && (
@@ -861,7 +985,8 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
         </div>
       )}
 
-      {/* Tab Navigation - HoneyQuote pill style */}
+      {/* Tab Navigation - HoneyQuote pill style. Hidden on the renewal confirmation card. */}
+      {!isPropertyConfirmation && (
       <div
         style={{
           display: 'flex',
@@ -906,7 +1031,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
             display: 'flex',
             alignItems: 'center',
             gap: '6px',
-            order: isTasksTool || hasServicingNotification ? -1 : 0,
+            order: isSignedComplete ? 0 : (isTasksTool || hasServicingNotification) ? -1 : 0,
           }}
         >
           <span>Servicing Tasks</span>
@@ -924,9 +1049,10 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
         </button>
         )}
       </div>
+      )}
 
       {/* Tab 1: Coverages & Deductibles — also rendered while the Servicing tab is hidden during the renewal window */}
-      {(activeTab === 'coverages' || isRenewalWindow) && (
+      {!isPropertyConfirmation && (activeTab === 'coverages' || isRenewalWindow) && (
         <div>
           <div
             style={{
@@ -1035,7 +1161,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
       )}
 
       {/* Tab 2: Servicing Tasks Checklist */}
-      {activeTab === 'checklist' && !isRenewalWindow && (
+      {!isPropertyConfirmation && activeTab === 'checklist' && !isRenewalWindow && (
         <div style={{ marginBottom: '16px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {/* Signature Item */}
@@ -1062,11 +1188,11 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
                     {signatureNeeded
                       ? 'Your renewal document needs your electronic signature'
-                      : signatureSigned ? 'Document signed' : 'No signature currently required'}
+                      : signatureSigned ? 'Your renewal document has been electronically signed' : 'No signature currently required'}
                   </div>
                 </div>
               </div>
-              {canManageSignature && (signatureNeeded || signatureSigned) && (
+              {canManageSignature && signatureNeeded && (
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <button
                   type="button"
@@ -1086,9 +1212,25 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                     transition: 'all 0.15s ease',
                   }}
                 >
-                  {isSigning ? 'Preparing...' : signatureSigned ? 'Sign Again' : 'Sign Now'}
+                  {isSigning ? 'Preparing...' : 'Sign Now'}
                 </button>
                 </div>
+              )}
+              {canManageSignature && signatureSigned && !signatureNeeded && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    color: '#1B493D',
+                    fontWeight: 700,
+                    padding: '6px 12px',
+                    borderRadius: '100px',
+                    background: '#FFFFFF',
+                    border: '1px solid #B8E2CB',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Document signed
+                </span>
               )}
             </div>
 
@@ -1113,9 +1255,21 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                   <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Supporting Documents</div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
                     {missingDocs.length > 0
-                      ? `Missing: ${missingDocs.map(formatDocumentLabel).join(', ')}`
-                      : 'All required documents verified'}
+                      ? `Open until uploaded. Missing: ${missingDocs.map(formatDocumentLabel).join(', ')}`
+                      : 'All required documents are on file'}
                   </div>
+                  {uploadedDocs.length > 0 && (
+                    <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      {uploadedDocs.map((doc) => (
+                        <div
+                          key={`${doc.uploadedAt}:${doc.fileName}`}
+                          style={{ fontSize: '11.5px', color: colors.textSecondary }}
+                        >
+                          {doc.fileName} · {formatDocumentLabel(doc.docType)} · saved
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
               {missingDocs.length > 0 && (
@@ -1274,7 +1428,8 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
         </div>
       )}
 
-      {/* Footer Action Bar - HoneyQuote rounded button style */}
+      {/* Footer Action Bar - HoneyQuote rounded button style. Hidden on the renewal confirmation card. */}
+      {!isPropertyConfirmation && (
       <div
         style={{
           display: 'flex',
@@ -1286,7 +1441,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           flexWrap: 'wrap',
         }}
       >
-        {canManageSignature && (signatureNeeded || signatureSigned) && (
+        {canManageSignature && signatureNeeded && (
           <button
             type="button"
             onClick={() => handleSignDocuSign()}
@@ -1314,13 +1469,10 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
             <span>
               {isSigning
                 ? 'Opening DocuSign...'
-                : signatureSigned
-                  ? 'Sign Again — send a new document'
-                  : 'Sign Now — signature needed on 1 document'}
+                : 'Sign Now — signature needed on 1 document'}
             </span>
           </button>
         )}
-        {canManageSignature && signatureSigned && <span>Document signed</span>}
         <button
           type="button"
           onClick={handleDownloadCOI}
@@ -1372,6 +1524,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           <span>{isSubmittingEndorsement || endorsementPending ? '⏳' : '⚙️'}</span> {isSubmittingEndorsement ? 'Submitting...' : endorsementPending ? 'Endorsement Under Review' : 'Request Policy Endorsement'}
         </button>
       </div>
+      )}
     </div>
   );
 }

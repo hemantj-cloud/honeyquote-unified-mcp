@@ -9,7 +9,7 @@ import { ServicingService } from './servicing.service.js';
 import { ServicingAuthService } from './servicing.auth.service.js';
 import { sessionKeyOf } from './session-key.js';
 import { SigningService } from './signing.service.js';
-import { APP_CONNECT_DOMAINS, resolveSigningPublicUrl } from '../../config/app-urls.js';
+import { APP_CONNECT_DOMAINS, resolveSigningPublicUrl, resolveWorkflowApiUrl } from '../../config/app-urls.js';
 import {
   sendOtpSchema,
   verifyOtpSchema,
@@ -26,6 +26,17 @@ const POLICY_WIDGET = {
   route: 'policy-widget-v2',
   csp: {
     connectDomains: [...APP_CONNECT_DOMAINS, 'https://honeyquoteproduction.blob.core.windows.net'],
+    resourceDomains: [
+      'https://honeyquoteproduction.blob.core.windows.net',
+      'https://cdn.prod.website-files.com',
+    ],
+  },
+};
+
+const SIGNING_WIDGET = {
+  route: 'signing-widget',
+  csp: {
+    connectDomains: [...APP_CONNECT_DOMAINS],
     resourceDomains: [
       'https://honeyquoteproduction.blob.core.windows.net',
       'https://cdn.prod.website-files.com',
@@ -56,6 +67,7 @@ function normalizeElectricalPanel(value: string): string {
 }
 
 const signingStatusUrl = () => `${resolveSigningPublicUrl()}/signing/status`;
+const documentUploadUrl = () => `${resolveSigningPublicUrl()}/api/policy/document/upload`;
 
 @Injectable({ deps: [ServicingService, ServicingAuthService, SigningService] })
 export class ServicingTools {
@@ -168,18 +180,25 @@ export class ServicingTools {
       this.authService.consumePolicyIntroduction(ticketId, sessionKey) ? 'Thank you, your identity is verified. ' : ''
     }Here are your policy details and coverage limits for your home. You can review everything in the card below.`;
 
+    // A renewed term that still needs a signature asks under the card. That yes
+    // generates a signing link; it is not consent to start another renewal.
+    const signingInvitation = this.servicingService.getSigningConsentInvitation(context);
+    const underCard = signingInvitation || renewal.renewalInvitation;
+
     return {
       userFacing: introduction,
       // NitroChat renders this field under the card, after the widget.
-      ...(renewal.renewalInvitation ? { renewalInvitation: renewal.renewalInvitation } : {}),
+      ...(underCard ? { renewalInvitation: underCard } : {}),
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
         presentation: 'renewal',
-        paid: context.status === 'IN_FORCE_RENEWED',
+        paid: context.status === 'IN_FORCE_RENEWED' || context.paymentStatus === 'PAID',
         authenticated: true,
         preventFollowUp: true,
-        awaitingRenewalConsent: renewal.isRenewalEligible,
+        awaitingRenewalConsent: signingInvitation ? false : renewal.isRenewalEligible,
+        awaitingSignatureConsent: Boolean(signingInvitation),
+        ...(signingInvitation ? { nextTool: 'hq_docusign_send' } : {}),
         customerName: context.customerName,
         ticketId,
         policyNumber: context.policyNumber,
@@ -250,6 +269,9 @@ export class ServicingTools {
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
         missingDocuments: context.missingDocuments,
+        uploadedDocuments: context.uploadedDocuments || [],
+        documentStatus: context.documentStatus || (context.missingDocuments?.length ? 'OPEN' : 'COMPLETE'),
+        documentUploadUrl: documentUploadUrl(),
         insuredEmail: context.recipientEmail,
         signingStatusUrl: signingStatusUrl(),
       },
@@ -437,7 +459,7 @@ export class ServicingTools {
   @Tool({
     name: 'hq_docusign_send',
     description:
-      'Prepares the DocuSign renewal-document signing link for the verified customer. Call immediately when the customer asks to sign, asks for the signing link, or replies yes after being offered it — do not ask how to deliver it. Its message (with the "Click here to sign" link) is shown automatically; add nothing. Do not call it on your own otherwise.',
+      'Prepares the DocuSign renewal-document signing link and shows it in the signing widget. Call immediately when the customer asks to sign, asks for the signing link, or replies yes after the under-card signing invitation — do not ask how to deliver it. Its message and the signing widget are shown automatically; add nothing. Do not call it because the customer clicked Sign Now on the policy card.',
     inputSchema: z.object({
       force: z
         .boolean()
@@ -445,19 +467,42 @@ export class ServicingTools {
         .describe('Issue a fresh signing document even if the current one is already signed'),
     }),
   })
+  @Widget(SIGNING_WIDGET)
   async docusignSend(input: { force?: boolean }, ctx: ExecutionContext) {
     const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
     if (!ticketId) return { success: false, ...unauthenticatedResult() };
 
     try {
+      const context = await this.servicingService.getTicketContext(ticketId);
       const result = await this.signingService.prepareSignature(ticketId, { force: input.force === true });
+      if (result.signed || !result.signingUrl) {
+        return {
+          success: true,
+          preventFollowUp: true,
+          userFacing: 'Your renewal document is already signed.',
+          // Host shows the text only — there is no link to put in the signing widget.
+          internal: { ...result, success: true, authenticated: false, preventFollowUp: true },
+        };
+      }
       return {
         success: true,
         preventFollowUp: true,
-        userFacing: result.signed
-          ? 'Your renewal document is already signed.'
-          : `Your document is ready to sign. [Click here to sign](${result.signingUrl})`,
-        internal: { ...result, success: true },
+        status: 'WIDGET_MOUNTED',
+        userFacing:
+          'Your document is ready to sign.\n\nPlease use the signing widget below to open DocuSign and sign:',
+        internal: {
+          ...result,
+          success: true,
+          authenticated: true,
+          preventFollowUp: true,
+          presentation: 'signing',
+          carrier: context.carrier,
+          policyNumber: context.policyNumber,
+          customerName: context.customerName,
+          ticketId,
+          signingStatusUrl: signingStatusUrl(),
+          workflowApiUrl: resolveWorkflowApiUrl(),
+        },
       };
     } catch (err: any) {
       const reason = String(err?.message || err);
@@ -473,28 +518,25 @@ export class ServicingTools {
         success: false,
         preventFollowUp: true,
         userFacing,
-        internal: { success: false, ok: false, error: reason },
+        internal: { success: false, ok: false, authenticated: false, preventFollowUp: true, error: reason },
       };
     }
   }
 
   @Tool({
     name: 'hq_docusign_status',
-    description: 'Check document signature status. NEVER call this tool autonomously or in a loop. Only call when the customer explicitly asks to verify or check signature status.',
+    description:
+      'Confirms whether the renewal document is signed. The policy card calls this once after DocuSign finishes; also call it once when the customer asks about signature status. When signed, its success message and the updated policy card are the whole reply — add nothing. Never call it in a loop.',
     inputSchema: z.object({ ticketId: z.string().optional() }),
   })
+  @Widget(POLICY_WIDGET)
   async docusignStatus(_input: { ticketId?: string }, ctx: ExecutionContext) {
     const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
     if (!ticketId) return { success: false, ...unauthenticatedResult() };
 
     try {
       const result = await this.signingService.signatureStatus(ticketId);
-      return {
-        success: true,
-        preventFollowUp: true,
-        internal: { ...result, success: true },
-        userFacing: result.signed ? 'Your document has been signed and recorded.' : 'Document signature is still pending.',
-      };
+      return await this.signatureStatusCard(ticketId, result.signed);
     } catch (err: any) {
       console.error('[signing] signatureStatus failed:', err?.message || err);
       return {
@@ -504,5 +546,49 @@ export class ServicingTools {
         userFacing: "I couldn't check the signature status right now. Please try again in a moment.",
       };
     }
+  }
+
+  /** Chat confirmation plus the policy card. A signed document shows the full renewed term. */
+  private async signatureStatusCard(ticketId: string, signed: boolean) {
+    const context = await this.servicingService.getTicketContext(ticketId);
+    const renewal = this.servicingService.getRenewalInvitation(context);
+    const signedNow = signed || context.signatureStatus === 'signed';
+
+    return {
+      success: true,
+      preventFollowUp: true,
+      status: 'WIDGET_MOUNTED',
+      userFacing: signedNow
+        ? 'Your renewal document has been signed successfully. Here are your complete policy details.'
+        : 'Document signature is still pending.',
+      internal: {
+        success: true,
+        authenticated: true,
+        preventFollowUp: true,
+        presentation: signedNow ? 'signed' : 'servicing',
+        paid: context.status === 'IN_FORCE_RENEWED' || context.paymentStatus === 'PAID',
+        hasNotification: !signedNow,
+        customerName: context.customerName,
+        ticketId,
+        policyNumber: context.policyNumber,
+        carrier: context.carrier,
+        status: context.status,
+        coverages: context.coverages,
+        deductibles: context.deductibles,
+        effectiveDate: context.effectiveDate,
+        renewalDate: context.renewalDate,
+        daysUntilExpiry: renewal.daysUntilExpiry,
+        signatureRequired: signedNow ? false : Boolean(context.signatureRequired),
+        signatureStatus: signedNow ? 'signed' : context.signatureStatus,
+        esignSent: context.esignSent,
+        missingDocuments: context.missingDocuments || [],
+        uploadedDocuments: context.uploadedDocuments || [],
+        documentStatus: context.documentStatus || (context.missingDocuments?.length ? 'OPEN' : 'COMPLETE'),
+        documentUploadUrl: documentUploadUrl(),
+        insuredEmail: context.recipientEmail,
+        workflowApiUrl: resolveWorkflowApiUrl(),
+        signingStatusUrl: signingStatusUrl(),
+      },
+    };
   }
 }

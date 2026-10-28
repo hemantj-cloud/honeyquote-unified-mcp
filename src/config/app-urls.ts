@@ -1,4 +1,4 @@
-export const DEPLOYED_APP_URL = 'https://hq-chat-6ae0c37c-hemants-org-d233dcd8.app.nitrocloud.ai';
+export const DEPLOYED_APP_URL = 'https://honeyquote-chatapp-6ae1ced1-abhijits-org-33666fb0.app.nitrocloud.ai';
 
 function isRunningInCloud(): boolean {
   return Boolean(process.env.NITRO_APP_URL || process.env.KUBERNETES_SERVICE_HOST || process.env.NITROCLOUD);
@@ -12,18 +12,24 @@ export function resolveWorkflowApiUrl(): string {
   );
 }
 
+function isForeignHost(hostname: string): boolean {
+  // NitroChat and the old workflow app do not serve /signing/*.
+  return hostname.startsWith('nitrochat-') || hostname.startsWith('hq-workflow-');
+}
+
 /** Public HTTPS origin of this app; DocuSign returns the signer here. */
 export function resolveSigningPublicUrl(): string {
   const fallback = (process.env.APP_URL || resolveWorkflowApiUrl()).replace(/\/$/, '');
   const configured = process.env.HQ_SIGNING_PUBLIC_URL?.trim().replace(/\/$/, '');
-  if (!configured) return fallback;
+  const candidate = configured || fallback;
   try {
-    // The workflow repo's URL belongs to a different deployment and has no signing routes here.
-    if (new URL(configured).hostname.startsWith('hq-workflow-')) return fallback;
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return DEPLOYED_APP_URL;
+    if (isForeignHost(parsed.hostname)) return DEPLOYED_APP_URL;
+    return parsed.origin;
   } catch {
-    return fallback;
+    return DEPLOYED_APP_URL;
   }
-  return configured;
 }
 
 export function toOrigin(url: string | undefined): string | null {
