@@ -3,14 +3,32 @@ import type { SeedTicketContext } from '../persistence/seed-data.js';
 
 export type HqTicketContext = SeedTicketContext;
 
+export const VERIFY_IDENTITY_PROMPT =
+  "I can help with that. First I need to verify your identity. Please share the email address or phone number on your policy, and I'll send a 6-digit verification code.";
+
+export function unauthenticatedResult() {
+  return {
+    userFacing: VERIFY_IDENTITY_PROMPT,
+    internal: {
+      success: false,
+      authenticated: false,
+      error: 'UNAUTHENTICATED_SESSION',
+      nextTool: 'send_customer_otp',
+    },
+  };
+}
+
 export interface OtpChallenge {
-  code: string;
-  identifier: string;
-  expiresAt: number;
-  ticketId: string;
-  customerName?: string;
   channel: 'sms' | 'email';
-  twilioVerifySent?: boolean;
+  /** Email or E.164 phone from the matched ticket — where the code was delivered. */
+  destination: string;
+  ticketId: string;
+  customerName: string;
+  /** Email codes only; SMS codes are issued and checked by Twilio Verify. */
+  codeHash?: Buffer;
+  sentAt: number;
+  expiresAt: number;
+  attempts: number;
 }
 
 export const sendOtpSchema = z.object({
@@ -26,7 +44,7 @@ export const verifyOtpSchema = z.object({
   identifier: z
     .string()
     .optional()
-    .describe('Customer phone number or email (optional, defaults to last session identifier)'),
+    .describe('Optional; the code is checked against the one sent in this chat'),
 });
 
 export type VerifyOtpInput = z.infer<typeof verifyOtpSchema>;

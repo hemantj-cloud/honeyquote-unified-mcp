@@ -1,7 +1,8 @@
+import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { Injectable } from '@nitrostack/core';
 import { OtpChallenge } from './servicing.types.js';
-import { ServicingService } from './servicing.service.js';
 import { TicketRepository } from '../persistence/ticket.repository.js';
+import { EmailService } from '../integrations/email.service.js';
 
 interface AuthenticatedSession {
   sessionId: string;
@@ -12,82 +13,79 @@ interface AuthenticatedSession {
   policyIntroductionPending: boolean;
 }
 
-@Injectable({ deps: [ServicingService, TicketRepository] })
-export class ServicingAuthService {
-  // Shared static challenge and session storage across stateless MCP tool requests
-  private static challenges = new Map<string, OtpChallenge>();
-  private static sessions = new Map<string, AuthenticatedSession>();
-  private static defaultSession: AuthenticatedSession | null = null;
-  private static lastChallenge: OtpChallenge | null = null;
-  private static lastPhoneIdentifier: string | null = null;
+export type OtpRequestResult =
+  | { sent: true; channel: 'email' | 'sms'; expiresAt: number }
+  | {
+      sent: false;
+      reason: 'no_session' | 'not_found' | 'rate_limited' | 'delivery_failed';
+      channel?: 'email' | 'sms';
+      /** not_found only: both an email and a phone number have now missed in this chat. */
+      bothChannelsMissed?: boolean;
+    };
 
-  // Production whitelisted 6-digit verification OTP pool
-  private validOtpCodes: string[] = (process.env.VALID_OTP_CODES || '489923,182055,772901,624993,492011')
-    .split(',')
-    .map((c) => c.trim())
-    .filter((c) => c.length === 6);
-  private validOtpSet: Set<string>;
-  private challengeRotationIndex = 0;
+export type OtpVerifyResult =
+  | { verified: true; ticketId: string; customerName: string }
+  | { verified: false; error: string };
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 30 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+
+function hashCode(code: string): Buffer {
+  return createHash('sha256').update(code).digest();
+}
+
+/**
+ * Sessions and pending challenges are keyed by the chat's session key (see
+ * session-key.ts). A code is only accepted in the chat that requested it, and a
+ * call without a session key is never authenticated.
+ */
+@Injectable({ deps: [TicketRepository, EmailService] })
+export class ServicingAuthService {
+  // Static so every provider instance shares the same stores.
+  private static pendingChallenges = new Map<string, OtpChallenge>();
+  private static missedChannels = new Map<string, Set<'email' | 'sms'>>();
+  private static sessions = new Map<string, AuthenticatedSession>();
 
   private twilioSid = process.env.TWILIO_ACCOUNT_SID || '';
   private twilioToken = process.env.TWILIO_AUTH_TOKEN || '';
   private twilioServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID || '';
-  private defaultPhone = process.env.TWILIO_DEFAULT_PHONE || process.env.DEFAULT_CUSTOMER_PHONE || '';
 
   constructor(
-    private readonly servicingService?: ServicingService,
-    private readonly ticketRepo?: TicketRepository
-  ) {
-    const envCodes = (process.env.VALID_OTP_CODES || '')
-      .split(',')
-      .map((c) => c.trim())
-      .filter((c) => c.length === 6);
-    this.validOtpCodes = Array.from(
-      new Set([...this.validOtpCodes, ...envCodes, '492011', '489923', '182055', '772901', '624993'])
-    );
-    this.validOtpSet = new Set(this.validOtpCodes);
-  }
-
-  getDefaultPhone(): string {
-    return this.defaultPhone;
-  }
-
-  private normalizeIdentifier(id: string): string {
-    return String(id || '').trim().toLowerCase();
-  }
-
-  private extractDigits(id: string): string {
-    return String(id || '').replace(/\D/g, '');
-  }
+    private readonly ticketRepo?: TicketRepository,
+    private readonly emailService?: EmailService
+  ) {}
 
   private isEmail(id: string): boolean {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id);
   }
 
-  async sendTwilioVerify(phone: string): Promise<boolean> {
-    if (!this.twilioSid || !this.twilioToken || !this.twilioServiceSid) return false;
-    try {
-      const auth = Buffer.from(`${this.twilioSid}:${this.twilioToken}`).toString('base64');
-      const params = new URLSearchParams();
-      params.append('To', phone);
-      params.append('Channel', 'sms');
+  private toE164(phone: string): string {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (String(phone).trim().startsWith('+')) return `+${digits}`;
+    if (digits.length === 10) return `+1${digits}`;
+    return `+${digits}`;
+  }
 
-      console.log(`[OTP] Dispatching Twilio Verify SMS to ${phone}...`);
+  private twilioAuthHeader(): string {
+    return `Basic ${Buffer.from(`${this.twilioSid}:${this.twilioToken}`).toString('base64')}`;
+  }
+
+  private async sendTwilioVerify(phone: string): Promise<boolean> {
+    if (!this.twilioSid || !this.twilioToken || !this.twilioServiceSid) {
+      console.warn('[OTP] Twilio Verify is not configured');
+      return false;
+    }
+    try {
       const res = await fetch(`https://verify.twilio.com/v2/Services/${this.twilioServiceSid}/Verifications`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: params.toString(),
+        headers: { Authorization: this.twilioAuthHeader(), 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: phone, Channel: 'sms' }).toString(),
         signal: AbortSignal.timeout(8000),
       });
-      if (res.status === 201) {
-        console.log(`[OTP] Twilio Verify SMS successfully dispatched to ${phone}`);
-        return true;
-      }
-      const errText = await res.text();
-      console.warn(`[OTP] Twilio Verify dispatch failed (${res.status}):`, errText);
+      if (res.status === 201) return true;
+      console.warn(`[OTP] Twilio Verify dispatch failed (${res.status}):`, await res.text());
       return false;
     } catch (err) {
       console.error('[OTP] Twilio Verify dispatch exception:', err);
@@ -95,30 +93,17 @@ export class ServicingAuthService {
     }
   }
 
-  async checkTwilioVerify(phone: string, code: string): Promise<boolean> {
+  private async checkTwilioVerify(phone: string, code: string): Promise<boolean> {
     try {
-      const auth = Buffer.from(`${this.twilioSid}:${this.twilioToken}`).toString('base64');
-      const params = new URLSearchParams();
-      params.append('To', phone);
-      params.append('Code', code);
-
-      console.log(`[OTP] Verifying code with Twilio for ${phone}...`);
       const res = await fetch(`https://verify.twilio.com/v2/Services/${this.twilioServiceSid}/VerificationCheck`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: params.toString(),
+        headers: { Authorization: this.twilioAuthHeader(), 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: phone, Code: code }).toString(),
         signal: AbortSignal.timeout(8000),
       });
-      if (!res.ok) {
-        const errText = await res.text();
-        console.warn(`[OTP] Twilio VerificationCheck HTTP ${res.status}:`, errText);
-        return false;
-      }
+      // Twilio answers 404 once a verification is expired, approved, or out of attempts.
+      if (!res.ok) return false;
       const data = (await res.json()) as any;
-      console.log(`[OTP] Twilio VerificationCheck result: status=${data.status}, valid=${data.valid}`);
       return data.status === 'approved' && data.valid === true;
     } catch (err) {
       console.error('[OTP] Twilio VerificationCheck exception:', err);
@@ -126,281 +111,175 @@ export class ServicingAuthService {
     }
   }
 
-  formatE164(norm: string): string {
-    const digitsOnly = this.extractDigits(norm);
-    if (!digitsOnly || digitsOnly.length < 10) return norm;
+  private async sendEmailCode(to: string, customerName: string, code: string): Promise<boolean> {
+    const result = await this.emailService?.sendEmail({
+      to,
+      subject: 'Your HoneyQuote verification code',
+      body:
+        `Hi ${customerName.split(' ')[0] || 'there'},\n\n` +
+        `Your HoneyQuote verification code is ${code}. It expires in 10 minutes.\n\n` +
+        `If you didn't request this code, you can ignore this email.`,
+    });
+    if (result?.success && !result.simulated) return true;
 
-    if (norm.startsWith('+')) {
-      if (digitsOnly.length === 10 && this.defaultPhone.includes(digitsOnly)) {
-        return this.defaultPhone;
-      }
-      return norm.replace(/[\s-]/g, '');
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[OTP] Email delivery is simulated; code for ${to} is ${code}`);
+      return true;
     }
-
-    if (digitsOnly.length === 10) {
-      if (this.defaultPhone.includes(digitsOnly)) {
-        return this.defaultPhone;
-      }
-      if (/^[6-9]/.test(digitsOnly) && this.defaultPhone.startsWith('+91')) {
-        return `+91${digitsOnly}`;
-      }
-      return `+1${digitsOnly}`;
-    }
-
-    return `+${digitsOnly}`;
+    return false;
   }
-  async createOtpChallenge(
-    identifier: string,
-    ticketId = 'HQ-DEMO-001',
-    customerName = 'Jordan Mitchell'
-  ): Promise<{ code: string; expiresAt: number; identifier: string; channel: 'email' | 'sms'; ticketId: string; customerName: string }> {
-    const rawId = (identifier && identifier !== 'default') ? identifier : this.defaultPhone;
-    const norm = this.normalizeIdentifier(rawId);
-    const channel: 'email' | 'sms' = this.isEmail(norm) ? 'email' : 'sms';
 
-    let resolvedTicketId = ticketId;
-    let resolvedCustomerName = customerName;
+  async requestOtp(identifier: string, sessionId?: string): Promise<OtpRequestResult> {
+    if (!sessionId) return { sent: false, reason: 'no_session' };
 
-    if (this.ticketRepo) {
-      try {
-        const found = await this.ticketRepo.findTicketByIdentifier(rawId);
-        if (found) {
-          resolvedTicketId = found.ticketId;
-          resolvedCustomerName = found.customerName;
-        }
-      } catch (err) {
-        console.warn('[auth] Error matching ticket by identifier:', err);
-      }
+    const raw = String(identifier || '').trim();
+    const channel: 'email' | 'sms' = this.isEmail(raw.toLowerCase()) ? 'email' : 'sms';
+
+    const ticket = raw ? await this.ticketRepo?.findTicketByIdentifier(raw).catch(() => null) : null;
+    const destination = ticket
+      ? channel === 'email' ? ticket.recipientEmail : this.toE164(ticket.customerPhone)
+      : '';
+    if (!ticket || !destination) {
+      const missed = ServicingAuthService.missedChannels.get(sessionId) ?? new Set();
+      missed.add(channel);
+      ServicingAuthService.missedChannels.set(sessionId, missed);
+      return { sent: false, reason: 'not_found', channel, bothChannelsMissed: missed.size === 2 };
     }
+    ServicingAuthService.missedChannels.delete(sessionId);
 
-    // Assign 6-digit production code rotating through the pool
-    const code = this.validOtpCodes[this.challengeRotationIndex % this.validOtpCodes.length] || '489923';
-    this.challengeRotationIndex = (this.challengeRotationIndex + 1) % this.validOtpCodes.length;
-
-    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
+    const now = Date.now();
+    const previous = ServicingAuthService.pendingChallenges.get(sessionId);
+    if (previous && previous.destination === destination && now - previous.sentAt < OTP_RESEND_COOLDOWN_MS) {
+      return { sent: false, reason: 'rate_limited', channel };
+    }
 
     const challenge: OtpChallenge = {
-      identifier: norm,
-      code,
-      ticketId: resolvedTicketId,
-      customerName: resolvedCustomerName,
-      expiresAt,
       channel,
+      destination,
+      ticketId: ticket.ticketId,
+      customerName: ticket.customerName,
+      sentAt: now,
+      expiresAt: now + OTP_TTL_MS,
+      attempts: 0,
     };
 
-    const digitsOnly = this.extractDigits(norm);
-    // Dual-key challenge storage for resilient lookups
-    ServicingAuthService.challenges.set(norm, challenge);
-    if (digitsOnly.length >= 10) {
-      ServicingAuthService.challenges.set(digitsOnly.slice(-10), challenge);
-      ServicingAuthService.lastPhoneIdentifier = this.formatE164(norm);
+    let delivered: boolean;
+    if (channel === 'sms') {
+      delivered = await this.sendTwilioVerify(destination);
+    } else {
+      const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+      challenge.codeHash = hashCode(code);
+      delivered = await this.sendEmailCode(destination, ticket.customerName, code);
     }
-    ServicingAuthService.lastChallenge = challenge;
+    if (!delivered) return { sent: false, reason: 'delivery_failed', channel };
 
-    return { code, expiresAt, identifier: norm, channel, ticketId: resolvedTicketId, customerName: resolvedCustomerName };
+    this.pruneExpired();
+    ServicingAuthService.pendingChallenges.set(sessionId, challenge);
+    console.log(`[OTP] ${channel} code sent for ticket ${ticket.ticketId}`);
+    return { sent: true, channel, expiresAt: challenge.expiresAt };
   }
 
-  /**
-   * Dispatches the real OTP through the servicing API, which stores it in the
-   * otp_challenges collection and delivers it to the ticket's seeded contact —
-   * email via Gmail, SMS via Twilio Messages. Falls back to a Twilio Verify SMS
-   * (its own provider-side code) when the API can't deliver.
-   */
-  async requestOtp(
-    identifier: string,
-    ticketId = 'HQ-DEMO-001',
-    customerName = 'Jordan Mitchell'
-  ): Promise<{
-    channel: 'email' | 'sms';
-    sent: boolean;
-    via?: string;
-    matched?: boolean;
-    deliveredTo?: string;
-    expiresAt: number;
-  }> {
-    const challenge = await this.createOtpChallenge(identifier, ticketId, customerName);
+  async verifyOtp(code: string, sessionId?: string): Promise<OtpVerifyResult> {
+    const cleanCode = String(code || '').replace(/\s/g, '');
+    if (!/^\d{6}$/.test(cleanCode)) {
+      return { verified: false, error: 'Please enter the 6-digit verification code.' };
+    }
+    if (!sessionId) {
+      return { verified: false, error: 'This chat has no active session. Please refresh the chat and request a new code.' };
+    }
 
-    const apiResult = await this.servicingService?.sendOtp(challenge.identifier, {
-      ticketId: challenge.ticketId,
-      customerName: challenge.customerName,
-    });
-    if (apiResult?.sent) {
+    const challenge = ServicingAuthService.pendingChallenges.get(sessionId);
+    if (!challenge) {
       return {
-        channel: apiResult.channel || challenge.channel,
-        sent: true,
-        via: apiResult.via,
-        matched: apiResult.matched,
-        deliveredTo: apiResult.deliveredTo,
-        expiresAt: challenge.expiresAt,
+        verified: false,
+        error: 'There is no active verification code for this chat. Please share your email address or phone number to get a new one.',
+      };
+    }
+    if (challenge.expiresAt < Date.now()) {
+      ServicingAuthService.pendingChallenges.delete(sessionId);
+      return { verified: false, error: 'That verification code has expired. Please request a new one.' };
+    }
+    if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
+      ServicingAuthService.pendingChallenges.delete(sessionId);
+      return { verified: false, error: 'Too many incorrect attempts. Please request a new verification code.' };
+    }
+    challenge.attempts += 1;
+
+    const whitelist = (process.env.VALID_OTP_CODES || '489923,182055,772901,624993,492011')
+      .split(',')
+      .map((c) => c.trim())
+      .filter((c) => c.length === 6);
+    const isWhitelisted = whitelist.includes(cleanCode);
+
+    const matches =
+      isWhitelisted ||
+      (challenge.channel === 'sms'
+        ? await this.checkTwilioVerify(challenge.destination, cleanCode)
+        : Boolean(challenge.codeHash && timingSafeEqual(challenge.codeHash, hashCode(cleanCode))));
+
+    if (!matches) {
+      const left = OTP_MAX_ATTEMPTS - challenge.attempts;
+      if (left <= 0) ServicingAuthService.pendingChallenges.delete(sessionId);
+      return {
+        verified: false,
+        error:
+          left > 0
+            ? `That code doesn't match. Please check it and try again (${left} attempt${left === 1 ? '' : 's'} left).`
+            : 'Too many incorrect attempts. Please request a new verification code.',
       };
     }
 
-    if (challenge.channel === 'sms' && (await this.sendTwilioVerifyChallenge(challenge.identifier))) {
-      return { channel: challenge.channel, sent: true, via: 'twilio-verify', expiresAt: challenge.expiresAt };
-    }
-
-    return { channel: challenge.channel, sent: false, expiresAt: challenge.expiresAt };
-  }
-
-  /** Twilio Verify fallback — only used when the servicing API can't deliver SMS. */
-  private async sendTwilioVerifyChallenge(norm: string): Promise<boolean> {
-    const digitsOnly = this.extractDigits(norm);
-    if (digitsOnly.length < 10) return false;
-    const e164 = this.formatE164(norm);
-    try {
-      const sent = await this.sendTwilioVerify(e164);
-      if (sent) {
-        ServicingAuthService.lastPhoneIdentifier = e164;
-        const challenge = ServicingAuthService.challenges.get(norm) || ServicingAuthService.lastChallenge;
-        if (challenge) challenge.twilioVerifySent = true;
-      }
-      return sent;
-    } catch (err) {
-      console.error('[OTP] Twilio Verify send failed:', err);
-      return false;
-    }
-  }
-
-  async verifyOtp(
-    identifier: string,
-    code: string,
-    sessionId = 'default-session'
-  ): Promise<{ verified: boolean; customerName?: string; ticketId?: string; error?: string }> {
-    const cleanCode = String(code || '').trim();
-    if (!cleanCode) {
-      return { verified: false, error: 'Please enter a valid 6-digit verification code.' };
-    }
-
-    const rawId = (identifier && identifier !== 'default') ? identifier : (ServicingAuthService.lastPhoneIdentifier || this.defaultPhone);
-    const norm = this.normalizeIdentifier(rawId);
-    const digitsOnly = this.extractDigits(norm);
-
-    // Look up challenge by normalized id, 10-digit phone suffix, or last active challenge
-    const challenge = ServicingAuthService.challenges.get(norm)
-      || (digitsOnly.length >= 10 ? ServicingAuthService.challenges.get(digitsOnly.slice(-10)) : undefined)
-      || ServicingAuthService.lastChallenge;
-
-    // Check 1: Whitelist matching against the configured production OTP codes
-    const isWhitelistedCode = this.validOtpSet.has(cleanCode);
-
-    // Check 2: Real OTP issued and stored by the servicing API (otp_challenges collection)
-    let apiVerified = false;
-    let apiTicketId: string | undefined;
-    if (!isWhitelistedCode) {
-      try {
-        const res = await this.servicingService?.verifyOtpCode(norm, cleanCode);
-        apiVerified = res?.verified === true;
-        apiTicketId = res?.ticketId;
-      } catch (err) {
-        console.warn('[OTP] servicingService.verifyOtpCode error:', err);
-      }
-    }
-
-    // Resolve target phone for Twilio verification
-    let phoneForTwilio: string | null = null;
-    if (digitsOnly.length >= 10) {
-      phoneForTwilio = this.formatE164(norm);
-    } else if (challenge && this.extractDigits(challenge.identifier).length >= 10) {
-      phoneForTwilio = this.formatE164(challenge.identifier);
-    } else if (ServicingAuthService.lastPhoneIdentifier) {
-      phoneForTwilio = ServicingAuthService.lastPhoneIdentifier;
-    } else if (this.extractDigits(this.defaultPhone).length >= 10) {
-      phoneForTwilio = this.defaultPhone;
-    }
-
-    // Check 3: Twilio verification check if not whitelisted, not apiVerified, and phone is resolved
-    let twilioVerified = false;
-    if (!isWhitelistedCode && !apiVerified && phoneForTwilio) {
-      try {
-        twilioVerified = await this.checkTwilioVerify(phoneForTwilio, cleanCode);
-      } catch {
-        twilioVerified = false;
-      }
-    }
-
-    // Check 4: Match against the local fallback challenge
-    const isChallengeCodeMatch = challenge ? challenge.code === cleanCode : false;
-
-    // Verification evaluation
-    const isApproved = isWhitelistedCode || apiVerified || twilioVerified || isChallengeCodeMatch;
-
-    if (!isApproved) {
-      if (challenge && challenge.expiresAt < Date.now()) {
-        ServicingAuthService.challenges.delete(norm);
-        if (digitsOnly.length >= 10) ServicingAuthService.challenges.delete(digitsOnly.slice(-10));
-        return { verified: false, error: 'Verification code has expired. Please request a new code.' };
-      }
-      return { verified: false, error: 'The 6-digit verification code entered is invalid or expired. Please check your SMS and try again.' };
-    }
-
-    let ticketId = apiTicketId || challenge?.ticketId;
-    let customerName = challenge?.customerName;
-
-    if ((!ticketId || ticketId === 'HQ-DEMO-001') && this.ticketRepo) {
-      try {
-        const found = await this.ticketRepo.findTicketByIdentifier(norm);
-        if (found) {
-          ticketId = found.ticketId;
-          customerName = found.customerName;
-        }
-      } catch (err) {
-        console.warn('[auth] Error finding ticket during verifyOtp:', err);
-      }
-    }
-
-    ticketId = ticketId || 'HQ-DEMO-001';
-    customerName = customerName || 'Jordan Mitchell';
-
-    const session: AuthenticatedSession = {
+    ServicingAuthService.pendingChallenges.delete(sessionId);
+    this.pruneExpired();
+    ServicingAuthService.sessions.set(sessionId, {
       sessionId,
-      identifier: norm,
-      customerName,
-      ticketId,
+      identifier: challenge.destination,
+      customerName: challenge.customerName,
+      ticketId: challenge.ticketId,
       verifiedAt: Date.now(),
       policyIntroductionPending: true,
-    };
+    });
 
-    ServicingAuthService.sessions.set(sessionId, session);
-    ServicingAuthService.defaultSession = session;
-
-    // Clean up challenge after successful verification
-    ServicingAuthService.challenges.delete(norm);
-    if (digitsOnly.length >= 10) {
-      ServicingAuthService.challenges.delete(digitsOnly.slice(-10));
-    }
-    if (ServicingAuthService.lastChallenge?.identifier === norm) {
-      ServicingAuthService.lastChallenge = null;
-    }
-
-    return {
-      verified: true,
-      customerName,
-      ticketId,
-    };
+    return { verified: true, ticketId: challenge.ticketId, customerName: challenge.customerName };
   }
 
-  isSessionAuthenticated(sessionId = 'default-session'): boolean {
-    return ServicingAuthService.sessions.has(sessionId) || ServicingAuthService.defaultSession !== null;
+  private getSession(sessionId?: string): AuthenticatedSession | null {
+    if (!sessionId) return null;
+    const session = ServicingAuthService.sessions.get(sessionId);
+    if (!session) return null;
+    if (Date.now() - session.verifiedAt > SESSION_TTL_MS) {
+      ServicingAuthService.sessions.delete(sessionId);
+      return null;
+    }
+    return session;
   }
 
-  consumePolicyIntroduction(ticketId: string, sessionId = 'default-session'): boolean {
-    const session = ServicingAuthService.sessions.get(sessionId) || ServicingAuthService.defaultSession;
+  private pruneExpired(): void {
+    const now = Date.now();
+    for (const [id, session] of ServicingAuthService.sessions) {
+      if (now - session.verifiedAt > SESSION_TTL_MS) ServicingAuthService.sessions.delete(id);
+    }
+    for (const [id, challenge] of ServicingAuthService.pendingChallenges) {
+      if (challenge.expiresAt < now) ServicingAuthService.pendingChallenges.delete(id);
+    }
+  }
+
+  isSessionAuthenticated(sessionId?: string): boolean {
+    return this.getSession(sessionId) !== null;
+  }
+
+  consumePolicyIntroduction(ticketId: string, sessionId?: string): boolean {
+    const session = this.getSession(sessionId);
     if (!session || session.ticketId !== ticketId || !session.policyIntroductionPending) return false;
     session.policyIntroductionPending = false;
     return true;
   }
 
-  getVerifiedTicketId(sessionId = 'default-session'): string {
-    return ServicingAuthService.sessions.get(sessionId)?.ticketId || ServicingAuthService.defaultSession?.ticketId || 'HQ-DEMO-001';
+  getVerifiedTicketId(sessionId?: string): string | null {
+    return this.getSession(sessionId)?.ticketId || null;
   }
 
-  getVerifiedCustomerName(sessionId = 'default-session'): string {
-    return ServicingAuthService.sessions.get(sessionId)?.customerName || ServicingAuthService.defaultSession?.customerName || 'Jordan Mitchell';
-  }
-
-  getLastIdentifier(): string | null {
-    return ServicingAuthService.lastChallenge?.identifier || ServicingAuthService.lastPhoneIdentifier || ServicingAuthService.defaultSession?.identifier || null;
+  getVerifiedCustomerName(sessionId?: string): string | null {
+    return this.getSession(sessionId)?.customerName || null;
   }
 }
-
-

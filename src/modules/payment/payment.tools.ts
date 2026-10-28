@@ -5,12 +5,16 @@ import {
   ExecutionContext,
 } from '@nitrostack/core';
 import { PaymentService } from './payment.service.js';
+import { ServicingAuthService } from '../servicing/servicing.auth.service.js';
+import { unauthenticatedResult } from '../servicing/servicing.types.js';
+import { sessionKeyOf } from '../servicing/session-key.js';
 import {
   createPaymentLinkSchema,
   checkPaymentStatusSchema,
   type CreatePaymentLinkInput,
   type CheckPaymentStatusInput,
 } from './payment.types.js';
+import { APP_CONNECT_DOMAINS, resolveSigningPublicUrl, resolveWorkflowApiUrl } from '../../config/app-urls.js';
 
 const STRIPE_PAYMENT_WIDGET = {
   route: 'stripe-payment-widget',
@@ -18,9 +22,7 @@ const STRIPE_PAYMENT_WIDGET = {
     connectDomains: [
       'https://api.stripe.com',
       'https://checkout.stripe.com',
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:3003',
+      ...APP_CONNECT_DOMAINS,
     ],
     resourceDomains: [
       'https://images.honeyquote.com',
@@ -33,11 +35,7 @@ const STRIPE_PAYMENT_WIDGET = {
 const POLICY_WIDGET = {
   route: 'policy-widget-v2',
   csp: {
-    connectDomains: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:3003',
-    ],
+    connectDomains: APP_CONNECT_DOMAINS,
     resourceDomains: [
       'https://honeyquoteproduction.blob.core.windows.net',
       'https://cdn.prod.website-files.com',
@@ -45,19 +43,30 @@ const POLICY_WIDGET = {
   },
 };
 
-@Injectable({ deps: [PaymentService] })
+@Injectable({ deps: [PaymentService, ServicingAuthService] })
 export class PaymentTools {
-  constructor(private readonly paymentService: PaymentService) {}
+  constructor(
+    private readonly paymentService: PaymentService,
+    private readonly authService: ServicingAuthService
+  ) {}
 
   @Tool({
     name: 'hq_stripe_create_payment_link',
     description:
-      'Generate an interactive Stripe checkout and payment widget to bind and pay for an insurance policy renewal (Step 4 Checkout). Use when the customer chooses a quote or carrier from the quotes comparison widget, or asks to proceed with payment.',
+      'Generate the Stripe checkout widget to pay for and bind a policy renewal. Call immediately after the customer confirms their on-record home details (pass only ticketId — the carrier, premium, and policy number come from the policy on record), or when the customer picks a carrier in the quotes widget (pass that carrier and premium).',
     inputSchema: createPaymentLinkSchema,
   })
   @Widget(STRIPE_PAYMENT_WIDGET)
-  async createPaymentLink(input: CreatePaymentLinkInput, _ctx: ExecutionContext) {
-    const result = await this.paymentService.createPaymentLink(input);
+  async createPaymentLink(input: CreatePaymentLinkInput, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
+
+    const result = await this.paymentService.createPaymentLink({
+      ...input,
+      ticketId,
+      policyNumber: undefined,
+      customerEmail: undefined,
+    });
     const formattedPremium = `$${result.premiumAmount.toLocaleString('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -77,8 +86,7 @@ export class PaymentTools {
         premiumAmount: result.premiumAmount,
         policyNumber: result.policyNumber,
         ticketId: result.ticketId,
-        customerEmail: result.customerEmail,
-        workflowApiUrl: process.env.HQ_SERVICING_API_BASE_URL || 'http://localhost:3000',
+        workflowApiUrl: resolveWorkflowApiUrl(),
         nextStep: 'post_renewal_verification',
       },
     };
@@ -91,9 +99,11 @@ export class PaymentTools {
     inputSchema: checkPaymentStatusSchema,
   })
   @Widget(POLICY_WIDGET)
-  async checkStripePaymentStatus(input: CheckPaymentStatusInput, _ctx: ExecutionContext) {
-    const ticketId = input.ticketId || 'HQ-DEMO-001';
-    const result = await this.paymentService.checkPaymentStatus(input);
+  async checkStripePaymentStatus(input: CheckPaymentStatusInput, ctx: ExecutionContext) {
+    // The Stripe return tab polls without a chat session, so the checkout id (bound to
+    // the ticket at creation) is what authorizes this call.
+    const ticketId = input.ticketId || this.authService.getVerifiedTicketId(sessionKeyOf(ctx)) || '';
+    const result = await this.paymentService.checkPaymentStatus({ ...input, ticketId });
 
     if (result.status !== 'paid') {
       return {
@@ -110,15 +120,14 @@ export class PaymentTools {
 
     const context: any = result.context || {};
     const firstName = String(context.customerName || '').split(' ')[0] || 'there';
+    const isSigned = context.signatureStatus === 'signed';
 
     return {
       userFacing:
         `Payment received — your policy renewal with ${context.carrier || 'Citizens'} is confirmed and **in force**.\n\n` +
-        (context.signatureStatus === 'signed'
-          ? 'Your document is signed.'
-          : context.signatureRequired
-          ? `Hey ${firstName}, please sign the renewal document — tap **Sign Now**, or **Send eSign Document** to receive the signing and chatbot links by SMS.`
-          : 'You can review your renewed policy in the card below.'),
+        (isSigned
+          ? 'Your renewal document is already signed. You can review your renewed policy in the card below.'
+          : `Hey ${firstName}, please sign the renewal document — tap **Sign Now** in the card below.`),
       preventFollowUp: true,
       internal: {
         authenticated: true,
@@ -137,10 +146,12 @@ export class PaymentTools {
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
         missingDocuments: context.missingDocuments,
-        billedToMortgage: context.billedToMortgage,
         insuredEmail: context.recipientEmail,
-        workflowApiUrl: process.env.HQ_SERVICING_API_BASE_URL || 'http://localhost:3000',
+        workflowApiUrl: resolveWorkflowApiUrl(),
+        signingStatusUrl: `${resolveSigningPublicUrl()}/signing/status`,
         checkoutSessionId: input.checkoutSessionId,
+        receiptId: context.receiptId,
+        amountPaid: context.renewalPremium,
       },
     };
   }

@@ -30,9 +30,9 @@ async function seed() {
     policyNumber: 'HQ-POL-88421',
     carrier: 'Citizens',
     customerName: 'Jordan Mitchell',
-    customerPhone: customerPhone,
-    recipientEmail: customerEmail,
-    customerEmail: customerEmail,
+    customerPhone: process.env.JORDAN_PHONE || '+13055550199',
+    recipientEmail: 'jordan.mitchell@example.com',
+    customerEmail: 'jordan.mitchell@example.com',
     userId: '6ad9bd5dcfc164fb5ece28e1',
     propertyAddress: '1244 Ocean Drive, Miami Beach, FL 33139',
     billedToMortgage: false,
@@ -99,11 +99,181 @@ async function seed() {
     createdAt: new Date().toISOString(),
   };
 
+  const navarathinamTicket = {
+    ticketId: 'HQ-DEMO-002',
+    subject: 'New business binding — signature outstanding',
+    status: 'new',
+    customerName: 'Navarathinam C',
+    policyNumber: 'HQ-POL-88422',
+    carrier: 'Citizens',
+    billedToMortgage: true,
+    recipientEmail: 'navarathinamc@wekancode.com',
+    customerEmail: 'navarathinamc@wekancode.com',
+    customerPhone: '+918695952729',
+    mortgageeEmail: 'escrow@examplemortgage.com',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    propertyAddress: '48 Palm Island Drive, Miami Beach, FL 33139',
+    propertyAttributes: {
+      address: '48 Palm Island Drive, Miami Beach, FL 33139',
+      yearBuilt: 2010,
+      squareFootage: 1850,
+      constructionType: 'Concrete Block / Stucco',
+      roofType: 'Barrel Tile',
+      roofGeometry: 'Gable Roof',
+      roofYear: 2015,
+      stories: 1,
+      primaryUse: 'Single Family Residence (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    effectiveDate: '2025-10-28',
+    renewalDate: '2026-11-14',
+    daysUntilExpiry: 17,
+    isRenewalEligible: true,
+    policyStatus: 'active',
+    paymentStatus: 'UNPAID',
+    coverages: {
+      dwelling: 420000,
+      personalProperty: 210000,
+      lossOfUse: 84000,
+      liability: 300000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    renewalPremium: 2120,
+    conversations: [],
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
+  const hemantTicket = {
+    ticketId: 'HQ-DEMO-003',
+    subject: 'New business binding — signature outstanding',
+    status: 'new',
+    customerName: 'Hemant Jadhav',
+    policyNumber: 'HQ-POL-88423',
+    carrier: 'Citizens',
+    billedToMortgage: true,
+    recipientEmail: 'hemantj@wekan.company',
+    customerEmail: 'hemantj@wekan.company',
+    customerPhone: customerPhone,
+    mortgageeEmail: 'escrow@examplemortgage.com',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    propertyAddress: '2310 Coral Way, Coral Gables, FL 33145',
+    propertyAttributes: {
+      address: '2310 Coral Way, Coral Gables, FL 33145',
+      yearBuilt: 2004,
+      squareFootage: 2100,
+      constructionType: 'Reinforced Masonry / Concrete',
+      roofType: 'Concrete Tile',
+      roofGeometry: 'Hip Roof',
+      roofYear: 2020,
+      stories: 2,
+      primaryUse: 'Single Family Residence (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    effectiveDate: '2025-10-28',
+    renewalDate: '2026-11-19',
+    daysUntilExpiry: 22,
+    isRenewalEligible: true,
+    policyStatus: 'active',
+    paymentStatus: 'UNPAID',
+    coverages: {
+      dwelling: 510000,
+      personalProperty: 255000,
+      lossOfUse: 102000,
+      liability: 500000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    renewalPremium: 2485,
+    conversations: [],
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
+  const arpanTicket = {
+    ticketId: 'HQ-DEMO-004',
+    subject: 'New business binding — signature outstanding',
+    status: 'new',
+    customerName: 'Arpan M',
+    policyNumber: 'HQ-POL-88424',
+    carrier: 'Citizens',
+    billedToMortgage: true,
+    recipientEmail: 'arpanm@wekan.company',
+    customerEmail: 'arpanm@wekan.company',
+    customerPhone: '+918335012464',
+    mortgageeEmail: 'escrow@examplemortgage.com',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    propertyAddress: '7721 Collins Ave Apt 9C, Miami Beach, FL 33141',
+    propertyAttributes: {
+      address: '7721 Collins Ave Apt 9C, Miami Beach, FL 33141',
+      yearBuilt: 1999,
+      squareFootage: 1200,
+      constructionType: 'Reinforced Concrete High-Rise',
+      roofType: 'Flat Membrane',
+      roofGeometry: 'Flat Roof',
+      roofYear: 2019,
+      stories: 1,
+      primaryUse: 'Condominium (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    effectiveDate: '2025-10-28',
+    renewalDate: '2026-11-23',
+    daysUntilExpiry: 26,
+    isRenewalEligible: true,
+    policyStatus: 'active',
+    paymentStatus: 'UNPAID',
+    coverages: {
+      dwelling: 260000,
+      personalProperty: 130000,
+      lossOfUse: 52000,
+      liability: 300000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    renewalPremium: 1590,
+    conversations: [],
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
   await db.collection('tickets').createIndex({ ticketId: 1 }, { unique: true });
   await db.collection('tickets').createIndex({ customerPhone: 1 });
   await db.collection('tickets').createIndex({ recipientEmail: 1 });
 
-  for (const t of [demoTicket, omniTicket]) {
+  const seedTickets = [demoTicket, omniTicket, navarathinamTicket, hemantTicket, arpanTicket];
+
+  for (const t of seedTickets) {
     await db.collection('tickets').replaceOne({ ticketId: t.ticketId }, t, { upsert: true });
     await db.collection('envelopes').deleteMany({ ticketId: t.ticketId });
     await db.collection('outbox').deleteMany({ ticketId: t.ticketId });
@@ -113,6 +283,38 @@ async function seed() {
     await db.collection('hitl_tasks').deleteMany({ ticketId: t.ticketId });
     await db.collection('tasks').deleteMany({ ticketId: t.ticketId });
     await db.collection('otp_challenges').deleteMany({ identifier: t.customerPhone });
+  }
+
+  // Clean up stale or duplicate OTP challenges for all seeded phones
+  for (const t of seedTickets) {
+    await db.collection('otp_challenges').deleteMany({
+      $or: [
+        { identifier: t.customerPhone },
+        { identifier: t.customerEmail },
+        { identifier: t.recipientEmail },
+      ].filter(Boolean),
+    });
+  }
+
+  // Remove duplicate tickets or numbers if any exist in the database
+  const canonicalIds = new Set(seedTickets.map((t) => t.ticketId));
+  const seenPhones = new Map<string, string>(); // digits -> ticketId
+  for (const t of seedTickets) {
+    const rawDigits = String(t.customerPhone || '').replace(/\D/g, '').slice(-10);
+    if (rawDigits) seenPhones.set(rawDigits, t.ticketId);
+  }
+
+  const allTickets = await db.collection('tickets').find({}).toArray();
+  for (const t of allTickets) {
+    if (!canonicalIds.has(t.ticketId)) {
+      const rawDigits = String(t.customerPhone || '').replace(/\D/g, '').slice(-10);
+      if (!rawDigits || seenPhones.has(rawDigits)) {
+        console.log(`🗑️ Removing duplicate/unregistered ticket from database: ${t.ticketId} (${t.customerName}: ${t.customerPhone})`);
+        await db.collection('tickets').deleteOne({ _id: t._id });
+        continue;
+      }
+      seenPhones.set(rawDigits, t.ticketId);
+    }
   }
 
   const seeded = await db

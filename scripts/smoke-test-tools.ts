@@ -5,6 +5,8 @@ import { AppModule } from '../src/app.module.js';
 async function smokeTest() {
   console.log('\n=== RUNNING HONEYQUOTE UNIFIED MCP SMOKE TESTS ===\n');
   const server = await McpApplicationFactory.create(AppModule);
+  // Allow async Mongo connection to settle
+  await new Promise((resolve) => setTimeout(resolve, 800));
 
   // Helper to call tool by name
   async function callTool(name: string, args: Record<string, any>) {

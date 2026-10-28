@@ -15,27 +15,6 @@ export class ServicingService {
     return await this.ticketRepo.getTicketContext(id);
   }
 
-  async sendOtp(
-    identifier: string,
-    meta: { ticketId?: string; customerName?: string } = {}
-  ): Promise<{ sent: boolean; channel?: 'email' | 'sms'; via?: string; matched?: boolean; deliveredTo?: string }> {
-    const isEmail = identifier.includes('@');
-    return {
-      sent: true,
-      channel: isEmail ? 'email' : 'sms',
-      via: 'direct',
-      matched: true,
-      deliveredTo: identifier,
-    };
-  }
-
-  async verifyOtpCode(identifier: string, code: string): Promise<{ verified: boolean; ticketId?: string }> {
-    return {
-      verified: true,
-      ticketId: 'HQ-DEMO-001',
-    };
-  }
-
   async appendConversationTurn(
     ticketId: string,
     sender: 'customer' | 'assistant' | 'system',
@@ -101,7 +80,7 @@ export class ServicingService {
       `• Carrier: ${carrier}\n` +
       `• Policy Number: ${policyNum}\n` +
       `• Term: ${effective} to ${renewal}\n` +
-      `• Billing: ${ctx.billedToMortgage ? 'Billed to Mortgage Escrow' : 'Direct Insured Billing'}\n\n` +
+      `• Billing: Direct Homeowner Pay (Stripe)\n\n` +
       `Coverages:\n` +
       `• Dwelling Protection: ${dwelling}\n` +
       `• Personal Property: ${personal}\n` +
@@ -126,13 +105,17 @@ export class ServicingService {
     }
 
     if (ctx.missingDocuments && ctx.missingDocuments.length > 0) {
-      items.push(`• Missing Supporting Documentation: ${ctx.missingDocuments.join(', ')}`);
+      const labels = ctx.missingDocuments.map((doc) => {
+        const text = doc.replace(/[_-]+/g, ' ').trim();
+        return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+      });
+      items.push(`• Missing Supporting Documentation: ${labels.join(', ')}`);
     } else {
       items.push('• Supporting Documents: All required documents have been received.');
     }
 
-    if (ctx.billedToMortgage) {
-      items.push('• Payment: Billed to your mortgage lender escrow account.');
+    if (ctx.paymentStatus === 'PAID') {
+      items.push('• Payment: Renewal premium paid via Stripe.');
     }
 
     if (items.length === 0) {
@@ -165,38 +148,25 @@ export class ServicingService {
     });
   }
 
-  async docusignSend(options: {
-    ticketId: string;
-    delivery: 'direct' | 'sms';
-    recipientEmail?: string;
-  }): Promise<{ ok: boolean; success: boolean; envelopeId: string; signed: boolean }> {
-    const envelopeId = `HQ-DS-${Date.now().toString(36).toUpperCase()}`;
-    await this.ticketRepo.updateTicket(options.ticketId, {
-      esignSent: true,
-      signatureStatus: 'PENDING_CUSTOMER_SIGNATURE',
-    });
+  /** Saves customer corrections to the on-record home details; returns the changed field names. */
+  async updatePropertyDetails(
+    ticketId: string,
+    updates: Partial<HqTicketContext['propertyAttributes']>
+  ): Promise<string[]> {
+    const changed = Object.entries(updates).filter(([, v]) => v !== undefined && v !== null && v !== '');
+    if (!changed.length) return [];
 
-    await this.appendConversationTurn(
-      options.ticketId,
-      'system',
-      `DocuSign envelope ${envelopeId} dispatched via ${options.delivery}.`
-    );
-
-    return {
-      ok: true,
-      success: true,
-      envelopeId,
-      signed: false,
-    };
-  }
-
-  async docusignStatus(ticketId: string): Promise<{ ok: boolean; status: string; signed: boolean }> {
     const ctx = await this.getTicketContext(ticketId);
-    const signed = ctx.signatureStatus === 'signed';
-    return {
-      ok: true,
-      status: ctx.signatureStatus || 'PENDING_CUSTOMER_SIGNATURE',
-      signed,
-    };
+    const propertyAttributes = {
+      ...ctx.propertyAttributes,
+      address: ctx.propertyAttributes?.address || ctx.propertyAddress,
+      ...Object.fromEntries(changed),
+    } as HqTicketContext['propertyAttributes'];
+
+    await this.ticketRepo.updateTicket(ticketId, {
+      propertyAttributes,
+      propertyAddress: propertyAttributes.address,
+    });
+    return changed.map(([k]) => k);
   }
 }

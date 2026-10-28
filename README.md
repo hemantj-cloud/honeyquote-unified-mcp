@@ -217,7 +217,6 @@ All configuration is declared in a single, unified `.env` file with clear domain
 │ TWILIO_AUTH_TOKEN            │ Identity / SMS           │ 4dee43213717c79a2a6fa863dceb583b                   │     No     │
 │ TWILIO_VERIFY_SERVICE_SID    │ Identity / SMS           │ VAb70b89c1f88aad93fec74b1d32220ded                 │     No     │
 │ DEFAULT_CUSTOMER_PHONE       │ Identity / SMS           │ +919503760623                                      │    Yes     │
-│ VALID_OTP_CODES              │ Identity / SMS           │ 489923,182055,772901,624993,492011                 │    Yes     │
 ├──────────────────────────────┼──────────────────────────┼────────────────────────────────────────────────────┼────────────┤
 │ GMAIL_ENABLED                │ Outbound Email           │ true                                               │     No     │
 │ GMAIL_CLIENT_ID              │ Outbound Email           │ 820672878931-...googleusercontent.com              │     No     │

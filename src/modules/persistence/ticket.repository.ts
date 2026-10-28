@@ -1,6 +1,6 @@
 import { Injectable } from '@nitrostack/core';
 import { MongoService } from './mongo.service.js';
-import { getDefaultSeedTicket, type SeedTicketContext } from './seed-data.js';
+import { getDefaultSeedTicket, getHemantSeedTicket, type SeedTicketContext } from './seed-data.js';
 
 @Injectable({ deps: [MongoService] })
 export class TicketRepository {
@@ -9,6 +9,8 @@ export class TicketRepository {
   constructor(private readonly mongoService?: MongoService) {
     const defaultTicket = getDefaultSeedTicket();
     this.memoryStore.set(defaultTicket.ticketId, defaultTicket);
+    const hemantTicket = getHemantSeedTicket();
+    this.memoryStore.set(hemantTicket.ticketId, hemantTicket);
   }
 
   async getTicketContext(ticketId: string): Promise<SeedTicketContext> {

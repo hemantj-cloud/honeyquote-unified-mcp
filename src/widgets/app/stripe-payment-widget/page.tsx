@@ -35,13 +35,28 @@ export default function StripePayButtonWidget() {
   const checkoutUrl = rawData.checkoutUrl || sdkOutput?.checkoutUrl || 'https://checkout.stripe.com';
   const receiptId = rawData.receiptId || sdkOutput?.receiptId || `rcpt_renew_${Date.now()}`;
   const checkoutSessionId = rawData.checkoutSessionId || sdkOutput?.checkoutSessionId || '';
-  const ticketId = rawData.ticketId || 'HQ-DEMO-001';
-  const workflowApiUrl =
-    rawData.workflowApiUrl ||
-    sdkOutput?.workflowApiUrl ||
-    (typeof window !== 'undefined' && window.location.hostname.includes('nitrocloud.ai')
-      ? 'https://hq-workflow-6adb190c-abhijits-org-33666fb0.app.nitrocloud.ai'
-      : 'http://localhost:3000');
+  const returnTicketId =
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('ticket_id') : null;
+  const ticketId = rawData.ticketId || returnTicketId || 'HQ-DEMO-001';
+  const workflowApiUrl = (() => {
+    if (typeof window !== 'undefined') {
+      if (window.location.hostname.includes('nitrocloud.ai')) {
+        return window.location.origin;
+      }
+      try {
+        if (window.parent && window.parent.location.hostname.includes('nitrocloud.ai')) {
+          return window.parent.location.origin;
+        }
+      } catch {}
+    }
+    const candidate = rawData.workflowApiUrl || sdkOutput?.workflowApiUrl;
+    if (candidate && candidate.startsWith('http')) {
+      return candidate;
+    }
+    return typeof window !== 'undefined' && window.location.port === '3000'
+      ? window.location.origin
+      : 'http://localhost:3000';
+  })();
 
   // Stripe Checkout redirects back to this same page after payment. Detect the
   // return params, show a receipt, and self-close — the tab was script-opened
@@ -49,20 +64,94 @@ export default function StripePayButtonWidget() {
   const urlParams =
     typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
   const isCancelledReturn = urlParams?.get('payment') === 'cancelled';
-  const isReturnLanding = Boolean(urlParams?.get('session_id') || isCancelledReturn);
+  const isReturnLanding = Boolean(
+    urlParams?.get('session_id') ||
+    urlParams?.get('renewed') === 'true' ||
+    isCancelledReturn
+  );
+
+  // Check if session or ticket was already marked paid in SDK data, widgetState, or localStorage
+  const getInitialPaid = (): boolean => {
+    if (
+      rawData.paymentStatus === 'PAID' ||
+      rawData.paymentStatus === 'paid' ||
+      (rawData as any).paid === true ||
+      (rawData as any).status === 'IN_FORCE_RENEWED' ||
+      (rawData as any).status === 'paid' ||
+      urlParams?.get('renewed') === 'true'
+    ) {
+      return true;
+    }
+    // If explicitly awaiting checkout, do NOT use stale ticket localStorage from past runs
+    if (rawData.paymentStatus === 'AWAITING_CHECKOUT') {
+      if (typeof window !== 'undefined') {
+        try {
+          if (checkoutSessionId && localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true') {
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    }
+    if (typeof window !== 'undefined') {
+      const widgetState = (window as any).openai?.widgetState;
+      if (widgetState?.paymentStatus === 'paid' || widgetState?.paid === true) {
+        return true;
+      }
+      try {
+        if (checkoutSessionId && localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true') {
+          return true;
+        }
+        if (ticketId && localStorage.getItem(`hq_paid_ticket_${ticketId}`) === 'true') {
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  };
+
+  const initialPaid = getInitialPaid();
 
   const [hovered, setHovered] = useState(false);
-  const [clicked, setClicked] = useState(false);
-  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | 'error'>('pending');
+  const [clicked, setClicked] = useState(initialPaid);
+  const [popupBlocked, setPopupBlocked] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | 'error'>(initialPaid ? 'paid' : 'pending');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Self-close the tab upon returning from Stripe Checkout.
-  // Browsers allow scripts to close a window if it was opened by script or
-  // if window.open('', '_self') claims the window.
+  // On return from Stripe Checkout: persist the paid status on the backend, keep the
+  // confirmation visible briefly, then self-close the tab.
   useEffect(() => {
     if (!isReturnLanding) return;
+    let cancelled = false;
 
-    const attemptClose = () => {
+    const sessId = urlParams?.get('session_id') || checkoutSessionId;
+    const confirmPayment = async () => {
+      if (!sessId || urlParams?.get('renewed') !== 'true') return;
+      const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
+      try {
+        await fetch(mcpEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: 'hq_stripe_payment_status',
+              arguments: { checkoutSessionId: sessId, ticketId },
+            },
+          }),
+          keepalive: true,
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch (err) {
+        console.warn('[stripe-widget] Return-page payment confirmation failed:', err);
+      }
+    };
+
+    const minDisplay = new Promise((resolve) => setTimeout(resolve, 1500));
+    Promise.all([confirmPayment(), minDisplay]).then(() => {
+      if (cancelled) return;
       try {
         window.close();
       } catch {}
@@ -70,36 +159,40 @@ export default function StripePayButtonWidget() {
         window.open('', '_self');
         window.close();
       } catch {}
-    };
-
-    // Try immediately
-    attemptClose();
-
-    // Also try on a short timer in case DOM wasn't fully loaded
-    const t1 = setTimeout(attemptClose, 500);
-    const t2 = setTimeout(attemptClose, 1500);
+    });
 
     return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
+      cancelled = true;
     };
-  }, [isReturnLanding]);
+  }, [isReturnLanding, checkoutSessionId, ticketId, workflowApiUrl]);
 
   // Poll the servicing API until the checkout session reports paid.
+  // Polls immediately on mount (or when session is present), not waiting for button click alone.
   useEffect(() => {
-    if (!clicked || !checkoutSessionId || paymentStatus !== 'pending') return;
+    if (!checkoutSessionId || paymentStatus === 'paid') return;
     const startedAt = Date.now();
     const MAX_POLL_MS = 10 * 60 * 1000;
-    pollRef.current = setInterval(async () => {
+
+    const checkStatus = async () => {
       if (Date.now() - startedAt > MAX_POLL_MS) {
         setPaymentStatus('error');
         if (pollRef.current) clearInterval(pollRef.current);
         return;
       }
       try {
-        let data: any = null;
+        // Check localStorage fast path first
+        if (typeof window !== 'undefined') {
+          try {
+            if (localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true' ||
+                (ticketId && localStorage.getItem(`hq_paid_ticket_${ticketId}`) === 'true')) {
+              setPaymentStatus('paid');
+              if (pollRef.current) clearInterval(pollRef.current);
+              return;
+            }
+          } catch {}
+        }
 
-        // Poll server silently via direct HTTP to avoid spamming chat messages during polling
+        let data: any = null;
         const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
         try {
           const resp = await fetch(mcpEndpoint, {
@@ -142,44 +235,82 @@ export default function StripePayButtonWidget() {
         if (isPaid) {
           setPaymentStatus('paid');
           if (pollRef.current) clearInterval(pollRef.current);
+          if (typeof window !== 'undefined') {
+            try {
+              if (checkoutSessionId) {
+                localStorage.setItem(`hq_paid_session_${checkoutSessionId}`, 'true');
+              }
+              if (ticketId) {
+                localStorage.setItem(`hq_paid_ticket_${ticketId}`, 'true');
+              }
+              const openaiSdk = (window as any).openai;
+              if (openaiSdk?.setWidgetState) {
+                openaiSdk.setWidgetState({ paymentStatus: 'paid', paid: true, ticketId, checkoutSessionId });
+              }
+              try {
+                if (typeof openaiSdk?.callTool === 'function') {
+                  openaiSdk.callTool('hq_stripe_payment_status', { checkoutSessionId, ticketId });
+                }
+              } catch (sdkErr) {
+                console.warn('[stripe-widget] openaiSdk.callTool warning:', sdkErr);
+              }
+              window.parent.postMessage(
+                {
+                  type: 'nitro:widget_action',
+                  action: 'payment_success',
+                  ticketId,
+                  checkoutSessionId,
+                  status: 'paid',
+                },
+                '*'
+              );
+            } catch (cacheErr) {
+              console.warn('[stripe-widget] Error saving paid cache state:', cacheErr);
+            }
+          }
         }
       } catch {
         // Transient error — keep polling.
       }
-    }, 5000);
+    };
+
+    // Run immediately
+    checkStatus();
+    // Then poll every 3 seconds
+    pollRef.current = setInterval(checkStatus, 3000);
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [clicked, checkoutSessionId, paymentStatus, ticketId, workflowApiUrl]);
+  }, [checkoutSessionId, paymentStatus, ticketId, workflowApiUrl]);
 
-  // Dynamic height reporting to parent NitroChat iframe container
+  // Report the card's height to the NitroChat iframe whenever its content resizes, so the
+  // frame never keeps a stale (taller) height after data, fonts, or state changes land.
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastHeight = -1;
     const notifyHeight = () => {
-      const widgetId = (window as any).openai?.widgetId;
-      if (containerRef.current) {
-        const height = containerRef.current.scrollHeight + 24;
-        window.parent.postMessage(
-          {
-            type: 'nitro:set_height',
-            widgetId,
-            height: Math.max(height, 240),
-          },
-          '*'
-        );
-      }
+      const height = Math.max(el.scrollHeight + 24, 240);
+      if (height === lastHeight) return;
+      lastHeight = height;
+      window.parent.postMessage(
+        { type: 'nitro:set_height', widgetId: (window as any).openai?.widgetId, height },
+        '*'
+      );
     };
-
     notifyHeight();
-    const timer = setTimeout(notifyHeight, 150);
-    return () => clearTimeout(timer);
-  }, [clicked]);
+    const observer = new ResizeObserver(notifyHeight);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const formattedPremium = `$${premium.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
 
-  const handlePayClick = () => {
+  const handlePayClick = (e?: React.MouseEvent) => {
     setClicked(true);
     if (checkoutUrl) {
       try {
@@ -187,10 +318,18 @@ export default function StripePayButtonWidget() {
         if (typeof openaiSdk?.openExternal === 'function') {
           openaiSdk.openExternal({ href: checkoutUrl });
         } else {
-          window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
+          // Never navigate this iframe to Stripe: Checkout refuses to be framed and the
+          // widget would be replaced by a stuck loading skeleton.
+          // No 'noopener' feature: it makes window.open return null even on success.
+          const win = window.open(checkoutUrl, '_blank');
+          if (win) {
+            win.opener = null;
+          } else {
+            setPopupBlocked(true);
+          }
         }
       } catch {
-        window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
+        setPopupBlocked(true);
       }
 
       try {
@@ -481,7 +620,21 @@ export default function StripePayButtonWidget() {
                 gap: '6px',
               }}
             >
-              <span>⏳</span> Stripe checkout opened — checking payment status every 5s...
+              <span>⏳</span> Stripe checkout opened — checking payment status every 3s...
+            </div>
+          )}
+
+          {clicked && paymentStatus === 'pending' && (
+            <div style={{ marginTop: '8px', textAlign: 'center', fontSize: '12px', color: textSecondary }}>
+              {popupBlocked ? 'Your browser blocked the checkout tab. ' : "Checkout didn't open? "}
+              <a
+                href={checkoutUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#177C56', fontWeight: 600 }}
+              >
+                Open Stripe checkout
+              </a>
             </div>
           )}
         </div>

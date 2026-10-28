@@ -8,6 +8,18 @@ export interface SeedTicketContext {
   recipientEmail: string;
   userId: string;
   paymentStatus?: string;
+  renewalCarrier?: string;
+  renewalPremium?: number;
+  receiptId?: string;
+  checkoutSessionId?: string;
+  /** Policy PDF (in HQ_POLICY_PDF_DIR) the current term must be signed on. */
+  renewalDocumentId?: string;
+  /** Document the stored envelope / completed signature belongs to. */
+  signatureDocumentId?: string | null;
+  envelopeId?: string | null;
+  signatureCompletedAt?: string | null;
+  pendingEffectiveDate?: string;
+  pendingRenewalDate?: string;
   billedToMortgage: boolean;
   effectiveDate: string;
   renewalDate: string;
@@ -62,8 +74,8 @@ export function getDefaultSeedTicket(): SeedTicketContext {
     carrier: 'Citizens',
     status: 'active',
     customerName: 'Jordan Mitchell',
-    customerPhone: process.env.TWILIO_DEFAULT_PHONE || process.env.DEFAULT_CUSTOMER_PHONE || '+919503760623',
-    recipientEmail: process.env.DEMO_CUSTOMER_EMAIL || 'hemantj@wekancode.com',
+    customerPhone: '+13055550199',
+    recipientEmail: 'jordan.mitchell@example.com',
     userId: '6ad9bd5dcfc164fb5ece28e1',
     billedToMortgage: true,
     effectiveDate,
@@ -110,3 +122,57 @@ export function getDefaultSeedTicket(): SeedTicketContext {
     ],
   };
 }
+
+export function getHemantSeedTicket(): SeedTicketContext {
+  const now = Date.now();
+  const effectiveDate = new Date(now - 350 * 86400000).toISOString().slice(0, 10);
+  const renewalDate = new Date(now + 22 * 86400000).toISOString().slice(0, 10);
+
+  return {
+    ticketId: 'HQ-DEMO-003',
+    policyNumber: 'HQ-POL-88423',
+    carrier: 'Citizens',
+    status: 'new',
+    customerName: 'Hemant Jadhav',
+    customerPhone: process.env.TWILIO_DEFAULT_PHONE || process.env.DEFAULT_CUSTOMER_PHONE || '+919503760623',
+    recipientEmail: process.env.DEMO_CUSTOMER_EMAIL || 'hemantj@wekan.company',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    billedToMortgage: true,
+    effectiveDate,
+    renewalDate,
+    daysUntilExpiry: 22,
+    coverages: {
+      dwelling: 510000,
+      personalProperty: 255000,
+      lossOfUse: 102000,
+      liability: 500000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    propertyAddress: '2310 Coral Way, Coral Gables, FL 33145',
+    propertyAttributes: {
+      address: '2310 Coral Way, Coral Gables, FL 33145',
+      yearBuilt: 2004,
+      squareFootage: 2100,
+      constructionType: 'Reinforced Masonry / Concrete',
+      roofType: 'Concrete Tile',
+      roofGeometry: 'Hip Roof',
+      roofYear: 2020,
+      stories: 2,
+      primaryUse: 'Single Family Residence (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    conversations: [],
+  };
+}
+

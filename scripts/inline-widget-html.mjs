@@ -39,6 +39,7 @@ function inlineHtmlWithAssets(htmlPath, outDir) {
   });
 
   html = html.replace(/<link[^>]*rel=["']preload["'][^>]*>/g, '');
+
   return html;
 }
 

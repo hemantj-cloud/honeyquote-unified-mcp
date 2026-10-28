@@ -244,12 +244,13 @@ export default function InsuranceQuotesWidget() {
       setStreamEnded(true);
     }, STREAM_DURATION_MS);
 
-    // If the stream hasn't returned any quotes after 2.5 seconds, use fallback quotes
+    // Fallback: if the SSE stream is empty or slow, ensure quotes render within 1.5s
     const fallbackTimer = window.setTimeout(() => {
       setQuotes((prev) => (prev.length > 0 ? prev : DEFAULT_PREVIEW_QUOTES));
       setStreamEnded(true);
       setProgressPercent(100);
-    }, 2500);
+      try { source.close(); } catch {}
+    }, 1500);
 
     const handleRateEvent = (event: MessageEvent) => {
       if (event.data === 'completed' || event.data === '[DONE]') {
@@ -308,7 +309,7 @@ export default function InsuranceQuotesWidget() {
   const progressComplete = progressPercent >= 100;
   const displayQuotes = quotes.length > 0 ? quotes : (streamEnded || progressComplete ? DEFAULT_PREVIEW_QUOTES : []);
 
-  const handleSelectQuote = (quote: QuoteCard) => {
+  const handleSelectQuote = async (quote: QuoteCard) => {
     const carrierName = quote.id.includes('citizens')
       ? 'Citizens Property Insurance'
       : quote.id.includes('universal')
@@ -317,22 +318,41 @@ export default function InsuranceQuotesWidget() {
       ? 'Heritage Insurance'
       : quote.id.split('-')[1]?.toUpperCase() || 'Citizens Property Insurance';
 
+    // The server binds checkout to the chat's verified customer; no ticket is sent from here.
+    const toolArgs = {
+      carrier: carrierName,
+      premiumAmount: quote.premiumValue,
+    };
+
     try {
       const openaiSdk = (window as any).openai;
       if (typeof openaiSdk?.callTool === 'function') {
-        openaiSdk.callTool('hq_stripe_create_payment_link', {
-          carrier: carrierName,
-          premiumAmount: quote.premiumValue,
-          ticketId: 'HQ-DEMO-001',
-          policyNumber: 'HQ-POL-88421',
-        });
+        await openaiSdk.callTool('hq_stripe_create_payment_link', toolArgs);
       } else {
-        // No postMessage fallback — the host turns widget actions into fake
-        // "You:" bubbles. A silent no-op is safer than a scripted user message.
-        console.warn('[quotes-widget] callTool unavailable in this host; quote selection not dispatched');
+        // Fallback via MCP HTTP call
+        const workflowApiUrl =
+          typeof window !== 'undefined'
+            ? (window.location.hostname.includes('nitrocloud.ai')
+                ? window.location.origin
+                : 'http://localhost:3000')
+            : 'http://localhost:3000';
+        const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
+        await fetch(mcpEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: 'hq_stripe_create_payment_link',
+              arguments: toolArgs,
+            },
+          }),
+        });
       }
     } catch (e) {
-      console.warn('Error selecting quote:', e);
+      console.warn('[quotes-widget] Error selecting quote:', e);
     }
   };
 

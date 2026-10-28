@@ -7,6 +7,9 @@ import {
 } from '@nitrostack/core';
 import { ServicingService } from './servicing.service.js';
 import { ServicingAuthService } from './servicing.auth.service.js';
+import { sessionKeyOf } from './session-key.js';
+import { SigningService } from './signing.service.js';
+import { APP_CONNECT_DOMAINS, resolveSigningPublicUrl } from '../../config/app-urls.js';
 import {
   sendOtpSchema,
   verifyOtpSchema,
@@ -16,17 +19,13 @@ import {
   VerifyOtpInput,
   GetPolicyDetailsInput,
   GetPendingTasksInput,
+  unauthenticatedResult,
 } from './servicing.types.js';
 
 const POLICY_WIDGET = {
   route: 'policy-widget-v2',
   csp: {
-    connectDomains: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:3003',
-      'https://honeyquoteproduction.blob.core.windows.net',
-    ],
+    connectDomains: [...APP_CONNECT_DOMAINS, 'https://honeyquoteproduction.blob.core.windows.net'],
     resourceDomains: [
       'https://honeyquoteproduction.blob.core.windows.net',
       'https://cdn.prod.website-files.com',
@@ -34,11 +33,36 @@ const POLICY_WIDGET = {
   },
 };
 
-@Injectable({ deps: [ServicingService, ServicingAuthService] })
+const PROPERTY_FIELD_LABELS: Record<string, string> = {
+  address: 'property address',
+  yearBuilt: 'year built',
+  squareFootage: 'square footage',
+  stories: 'stories',
+  constructionType: 'construction type',
+  roofType: 'roofing material',
+  roofGeometry: 'roof shape',
+  roofYear: 'roof replacement year',
+  primaryUse: 'primary use',
+  primaryHeating: 'heating',
+  plumbingSystem: 'plumbing',
+  electricalPanel: 'electrical panel',
+};
+
+function normalizeElectricalPanel(value: string): string {
+  const panel = value.toLowerCase().replace(/[\s_-]/g, '');
+  if (panel.includes('fuse')) return 'FuseBox';
+  if (panel.includes('breaker') || panel.includes('circuit')) return 'CircuitBreaker';
+  return value;
+}
+
+const signingStatusUrl = () => `${resolveSigningPublicUrl()}/signing/status`;
+
+@Injectable({ deps: [ServicingService, ServicingAuthService, SigningService] })
 export class ServicingTools {
   constructor(
     private readonly servicingService: ServicingService,
-    private readonly authService: ServicingAuthService
+    private readonly authService: ServicingAuthService,
+    private readonly signingService: SigningService
   ) {}
 
   @Tool({
@@ -47,19 +71,44 @@ export class ServicingTools {
       'Dispatches a 6-digit verification code (OTP) to the customer email or phone number for identity verification. Never returns policy details.',
     inputSchema: sendOtpSchema,
   })
-  async sendCustomerOtp(input: SendOtpInput, _ctx: ExecutionContext) {
-    const result = await this.authService.requestOtp(input.identifier);
+  async sendCustomerOtp(input: SendOtpInput, ctx: ExecutionContext) {
+    const result = await this.authService.requestOtp(input.identifier, sessionKeyOf(ctx));
+    const destination = input.identifier;
 
+    // NitroChat renders userFacing itself; preventFollowUp stops the model from repeating it.
+    if (result.sent) {
+      return {
+        userFacing: `A verification code has been sent to ${destination}. Please reply with the 6-digit code to continue.`,
+        preventFollowUp: true,
+        internal: {
+          sent: true,
+          preventFollowUp: true,
+          channel: result.channel,
+          expiresAt: result.expiresAt,
+          nextTool: 'verify_customer_otp',
+        },
+      };
+    }
+
+    const given = result.channel === 'email' ? 'email address' : 'mobile number';
+    const other = result.channel === 'email' ? 'mobile number' : 'email address';
+    const failureMessages: Record<typeof result.reason, string> = {
+      not_found: result.bothChannelsMissed
+        ? "I couldn't find a policy under that email address or mobile number. If you're new to HoneyQuote, I can help you get a quote for a new policy — would you like to start one?"
+        : `I couldn't find a policy on file with that ${given}. Could you share the ${other} associated with your policy instead?`,
+      rate_limited: `A code was just sent to ${destination}. Please wait a moment before requesting another one.`,
+      delivery_failed: `I couldn't send a verification code to ${destination} right now. Please try again in a moment, or use the other contact method on your policy.`,
+      no_session: 'This chat has no active session. Please refresh the chat and try again.',
+    };
     return {
+      userFacing: failureMessages[result.reason],
+      preventFollowUp: true,
       internal: {
-        sent: result.sent,
+        sent: false,
+        preventFollowUp: true,
+        reason: result.reason,
         channel: result.channel,
-        via: result.via,
-        matched: result.matched,
-        deliveredTo: result.deliveredTo,
-        identifier: input.identifier,
-        expiresAt: result.expiresAt,
-        nextTool: 'verify_customer_otp',
+        ...(result.bothChannelsMissed ? { offerNewQuote: true } : {}),
       },
     };
   }
@@ -67,62 +116,29 @@ export class ServicingTools {
   @Tool({
     name: 'verify_customer_otp',
     description:
-      'Validates the 6-digit verification code (OTP) entered by the customer in chat. Call this tool immediately whenever the customer sends a 6-digit code. After successful verification, immediately call get_policy_details with the ticketId to show the policy card.',
+      'Validates the 6-digit verification code (OTP) entered by the customer in chat. Call this tool immediately whenever the customer sends a 6-digit code. On success it shows the policy card itself — do not call get_policy_details afterwards and do not add any reply.',
     inputSchema: verifyOtpSchema,
   })
-  async verifyCustomerOtp(input: VerifyOtpInput, _ctx: ExecutionContext) {
-    const identifier =
-      input.identifier || this.authService.getLastIdentifier() || this.authService.getDefaultPhone();
-    const res = await this.authService.verifyOtp(identifier, input.code);
+  @Widget(POLICY_WIDGET)
+  async verifyCustomerOtp(input: VerifyOtpInput, ctx: ExecutionContext) {
+    const res = await this.authService.verifyOtp(input.code, sessionKeyOf(ctx));
 
     if (!res.verified) {
+      // authenticated:false makes NitroChat show only the text, without an empty card.
       return {
-        userFacing: `Verification failed: ${
-          res.error || 'The verification code entered is invalid or expired'
-        }. Please check the code and try again.`,
-        internal: {
-          verified: false,
-          error: res.error,
-          nextTool: 'send_customer_otp',
-        },
+        userFacing: res.error,
+        preventFollowUp: true,
+        internal: { verified: false, authenticated: false, preventFollowUp: true, error: res.error },
       };
     }
 
-    const ticketId = res.ticketId || 'HQ-DEMO-001';
-    let policyNum = 'HQ-POL-88421';
-    let carrierName = 'Citizens';
-    let customerName = res.customerName || '';
-
-    try {
-      const context = await this.servicingService.getTicketContext(ticketId);
-      if (context?.policyNumber) policyNum = context.policyNumber;
-      if (context?.carrier) carrierName = context.carrier;
-      if (!customerName && context?.customerName) customerName = context.customerName;
-    } catch {
-      // Non-blocking fallback
-    }
-
-    if (!customerName) {
-      customerName = this.authService.getVerifiedCustomerName() || 'Jordan Mitchell';
-    }
-
     await this.servicingService.appendConversationTurn(
-      ticketId,
+      res.ticketId,
       'system',
-      `Customer ${customerName} successfully authenticated via OTP.`
+      `Customer ${res.customerName} successfully authenticated via OTP.`
     );
 
-    return {
-      userFacing: 'Identity verified successfully. Fetching your policy details and coverage limits now...',
-      internal: {
-        verified: true,
-        nextTool: 'get_policy_details',
-        customerName: customerName || undefined,
-        ticketId,
-        policyNumber: policyNum || undefined,
-        carrier: carrierName,
-      },
-    };
+    return this.policyDetailsResult(res.ticketId, sessionKeyOf(ctx));
   }
 
   @Tool({
@@ -132,20 +148,13 @@ export class ServicingTools {
     inputSchema: getPolicyDetailsSchema,
   })
   @Widget(POLICY_WIDGET)
-  async getPolicyDetails(input: GetPolicyDetailsInput, _ctx: ExecutionContext) {
-    if (!this.authService.isSessionAuthenticated()) {
-      return {
-        userFacing:
-          'Please provide your mobile number or email address so I can send a verification code.',
-        internal: {
-          authenticated: false,
-          error: 'UNAUTHENTICATED_SESSION',
-          nextTool: 'send_customer_otp',
-        },
-      };
-    }
+  async getPolicyDetails(_input: GetPolicyDetailsInput, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
+    return this.policyDetailsResult(ticketId, sessionKeyOf(ctx));
+  }
 
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
+  private async policyDetailsResult(ticketId: string, sessionKey: string | undefined) {
     const context = await this.servicingService.getTicketContext(ticketId);
     const renewal = this.servicingService.getRenewalInvitation(context);
 
@@ -155,8 +164,12 @@ export class ServicingTools {
       `Shared policy details for ${context.policyNumber} (${context.carrier})`
     );
 
+    const introduction = `${
+      this.authService.consumePolicyIntroduction(ticketId, sessionKey) ? 'Thank you, your identity is verified. ' : ''
+    }Here are your policy details and coverage limits for your home. You can review everything in the card below.`;
+
     return {
-      userFacing: renewal.renewalInvitation || '',
+      userFacing: [introduction, renewal.renewalInvitation].filter(Boolean).join('\n\n'),
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
@@ -182,6 +195,8 @@ export class ServicingTools {
         propertyAddress: context.propertyAddress,
         userId: context.userId || '6ad9bd5dcfc164fb5ece28e1',
         insuredEmail: context.recipientEmail,
+        signingStatusUrl: signingStatusUrl(),
+        verified: true,
       },
     };
   }
@@ -193,20 +208,9 @@ export class ServicingTools {
     inputSchema: getPendingTasksSchema,
   })
   @Widget(POLICY_WIDGET)
-  async getPendingTasks(input: GetPendingTasksInput, _ctx: ExecutionContext) {
-    if (!this.authService.isSessionAuthenticated()) {
-      return {
-        userFacing:
-          'Please provide your mobile number or email address so I can send a verification code.',
-        internal: {
-          authenticated: false,
-          error: 'UNAUTHENTICATED_SESSION',
-          nextTool: 'send_customer_otp',
-        },
-      };
-    }
-
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
+  async getPendingTasks(_input: GetPendingTasksInput, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
 
     const context = await this.servicingService.getTicketContext(ticketId);
     const taskSummary = this.servicingService.formatPendingTasks(context);
@@ -243,8 +247,8 @@ export class ServicingTools {
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
         missingDocuments: context.missingDocuments,
-        billedToMortgage: context.billedToMortgage,
         insuredEmail: context.recipientEmail,
+        signingStatusUrl: signingStatusUrl(),
       },
     };
   }
@@ -252,60 +256,106 @@ export class ServicingTools {
   @Tool({
     name: 'get_renewal_property_details',
     description:
-      'Retrieves on-record home details for an authenticated renewal. Requires verified session. Call once for typed renewal intent; the Renew Policy widget already invokes it directly.',
+      'Shows the on-record home details in the policy card for an authenticated renewal. Requires verified session. Call once for typed renewal intent; the Renew Policy widget already invokes it directly. Relay userFacing only — the card lists the details. When the customer then confirms, call hq_stripe_create_payment_link with ticketId only.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Verified session ticket ID (e.g. HQ-DEMO-001)'),
     }),
   })
-  async getRenewalPropertyDetails(input: { ticketId?: string }, _ctx: ExecutionContext) {
-    if (!this.authService.isSessionAuthenticated()) {
+  @Widget(POLICY_WIDGET)
+  async getRenewalPropertyDetails(_input: { ticketId?: string }, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
+
+    await this.servicingService.appendConversationTurn(
+      ticketId,
+      'assistant',
+      'Presented renewal home details reconfirmation.'
+    );
+    return this.propertyConfirmationResult(
+      ticketId,
+      "Here are the home details on record for your renewal — please confirm they're still accurate in the card below, then reply yes."
+    );
+  }
+
+  @Tool({
+    name: 'update_renewal_property_details',
+    description:
+      'Saves customer corrections to the on-record home details during renewal reconfirmation (address, year built, square footage, roof, electrical panel, etc.). Call whenever the customer says ANY displayed detail is wrong or changed, before checkout — never keep a correction only in chat. Pass only the changed fields. It re-shows the updated card; then wait for the customer to confirm before calling hq_stripe_create_payment_link. Add nothing to its message.',
+    inputSchema: z.object({
+      propertyAttributes: z
+        .object({
+          address: z.string().optional().describe('Full property address: street, city, state, ZIP'),
+          yearBuilt: z.number().optional(),
+          squareFootage: z.number().optional(),
+          stories: z.number().optional(),
+          constructionType: z.string().optional(),
+          roofType: z.string().optional().describe('Roofing material, e.g. Concrete Tile'),
+          roofGeometry: z.string().optional().describe('Roof shape, e.g. Hip Roof'),
+          roofYear: z.number().optional().describe('Year the roof was last replaced'),
+          primaryUse: z.string().optional(),
+          primaryHeating: z.string().optional(),
+          plumbingSystem: z.string().optional(),
+          electricalPanel: z.string().optional().describe('CircuitBreaker or FuseBox'),
+        })
+        .describe('Only the home details the customer is correcting'),
+    }),
+  })
+  @Widget(POLICY_WIDGET)
+  async updateRenewalPropertyDetails(
+    input: { propertyAttributes?: Record<string, string | number | undefined> },
+    ctx: ExecutionContext
+  ) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
+
+    const updates = { ...(input.propertyAttributes ?? {}) };
+    if (typeof updates.address === 'string') updates.address = updates.address.trim();
+    if (typeof updates.electricalPanel === 'string') {
+      updates.electricalPanel = normalizeElectricalPanel(updates.electricalPanel);
+    }
+
+    const changed = await this.servicingService.updatePropertyDetails(ticketId, updates as any);
+    const labels = changed.map((f) => PROPERTY_FIELD_LABELS[f] ?? f);
+    if (!labels.length) {
       return {
         userFacing:
-          'Please provide your mobile number or email address so I can send a verification code.',
-        internal: {
-          authenticated: false,
-          error: 'UNAUTHENTICATED_SESSION',
-          nextTool: 'send_customer_otp',
-        },
+          "I didn't catch which detail to change. Tell me what needs updating — for example the property address, year built, square footage, or electrical panel.",
+        preventFollowUp: true,
+        internal: { authenticated: false, propertyDetailsUpdated: false, preventFollowUp: true },
       };
     }
 
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
-    const context = await this.servicingService.getTicketContext(ticketId);
+    await this.servicingService.appendConversationTurn(
+      ticketId,
+      'assistant',
+      `Updated renewal home details on file: ${labels.join(', ')}.`
+    );
+    const joined = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}` : labels[0];
+    return this.propertyConfirmationResult(
+      ticketId,
+      `I've updated your ${joined} on file. Here are the updated home details — please confirm they're accurate so I can prepare your renewal checkout.`,
+      changed
+    );
+  }
 
+  private async propertyConfirmationResult(ticketId: string, userFacing: string, updatedFields: string[] = []) {
+    const context = await this.servicingService.getTicketContext(ticketId);
     const attrs = {
       ...context.propertyAttributes,
       address: context.propertyAttributes?.address || context.propertyAddress,
     };
 
-    await this.servicingService.appendConversationTurn(
-      ticketId,
-      'assistant',
-      `Presented renewal home details reconfirmation for ${attrs.address}.`
-    );
-
-    const roofDesc = attrs.roofGeometry && attrs.roofType
-      ? `${attrs.roofGeometry}, ${attrs.roofType} (Replaced ${attrs.roofYear || 2018})`
-      : `${attrs.roofType || 'Concrete Tile'} (Replaced ${attrs.roofYear || 2018})`;
-
-    const sqftFormatted = attrs.squareFootage ? Number(attrs.squareFootage).toLocaleString() : '2,450';
-
     return {
-      userFacing:
-        `Home details on record for your renewal:\n\n` +
-        `• Property Address: ${attrs.address || '1244 Ocean Drive, Miami Beach, FL 33139'}\n` +
-        `• Year Built: ${attrs.yearBuilt || 2018}\n` +
-        `• Square Footage: ${sqftFormatted} sq ft\n` +
-        `• Construction Type: ${attrs.constructionType || 'Reinforced Masonry / Concrete'}\n` +
-        `• Roof Geometry & Age: ${roofDesc}\n` +
-        `• Primary Use: ${attrs.primaryUse || 'Single Family Residence (Owner Occupied)'}\n\n` +
-        `Are these details still accurate? Reply yes to continue to your renewal quotes.`,
+      userFacing,
       preventFollowUp: true,
       internal: {
         stage: 'awaiting_property_confirmation',
         awaitingPropertyConfirmation: true,
         authenticated: true,
         preventFollowUp: true,
+        presentation: 'renewal',
+        nextTool: 'hq_stripe_create_payment_link',
+        nextToolArgs: { ticketId },
         ticketId,
         policyNumber: context.policyNumber,
         carrier: context.carrier,
@@ -319,13 +369,15 @@ export class ServicingTools {
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
         missingDocuments: context.missingDocuments,
-        billedToMortgage: context.billedToMortgage,
         insuredEmail: context.recipientEmail,
         userId: context.userId || '6ad9bd5dcfc164fb5ece28e1',
         formId: 1,
         address: attrs.address,
         propertyAddress: attrs.address,
         propertyAttributes: attrs,
+        propertyDetailsUpdated: updatedFields.length > 0,
+        updatedFields,
+        correctionTool: 'update_renewal_property_details',
       },
     };
   }
@@ -341,9 +393,10 @@ export class ServicingTools {
   })
   async sendCertificateOfInsurance(
     input: { ticketId?: string; email?: string },
-    _ctx: ExecutionContext
+    ctx: ExecutionContext
   ) {
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return unauthenticatedResult();
     const context = await this.servicingService.getTicketContext(ticketId);
     const targetEmail = input.email || context.recipientEmail || 'hemantj@wekancode.com';
 
@@ -378,39 +431,37 @@ export class ServicingTools {
   @Tool({
     name: 'hq_docusign_send',
     description:
-      'Sends the DocuSign renewal-document signing request to the customer. NEVER call this tool autonomously. Call only when the customer explicitly asks for the signing link or to sign.',
+      'Prepares the DocuSign renewal-document signing link for the verified customer. Call immediately when the customer asks to sign, asks for the signing link, or replies yes after being offered it — do not ask how to deliver it. Its message (with the "Click here to sign" link) is shown automatically; add nothing. Do not call it on your own otherwise.',
     inputSchema: z.object({
-      ticketId: z.string().optional().describe('Policy servicing ticket ID (default HQ-DEMO-001)'),
-      recipientEmail: z.string().optional().describe('Customer email for the signing request'),
-      delivery: z
-        .enum(['direct', 'sms'])
+      force: z
+        .boolean()
         .optional()
-        .describe('Open signing directly or send signing link by SMS'),
+        .describe('Issue a fresh signing document even if the current one is already signed'),
     }),
   })
-  async docusignSend(
-    input: { ticketId?: string; recipientEmail?: string; delivery?: 'direct' | 'sms' },
-    _ctx: ExecutionContext
-  ) {
-    if (!this.authService.isSessionAuthenticated()) {
-      return { success: false, userFacing: 'Please provide your mobile number or email address so I can send a verification code.', internal: { success: false, authenticated: false } };
-    }
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
-    const result = await this.servicingService.docusignSend({
-      ticketId,
-      delivery: input.delivery || 'direct',
-      recipientEmail: input.recipientEmail,
-    });
+  async docusignSend(input: { force?: boolean }, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return { success: false, ...unauthenticatedResult() };
 
-    return {
-      success: true,
-      preventFollowUp: true,
-      userFacing:
-        input.delivery === 'sms'
-          ? 'The signing link and your chatbot link were sent by SMS to your phone on file.'
-          : 'Your document is ready to sign. Select Sign Now to open DocuSign.',
-      internal: { ...result, ticketId, success: true },
-    };
+    try {
+      const result = await this.signingService.prepareSignature(ticketId, { force: input.force === true });
+      return {
+        success: true,
+        preventFollowUp: true,
+        userFacing: result.signed
+          ? 'Your renewal document is already signed.'
+          : `Your document is ready to sign. [Click here to sign](${result.signingUrl})`,
+        internal: { ...result, success: true },
+      };
+    } catch (err: any) {
+      console.error('[signing] prepareSignature failed:', err?.message || err);
+      return {
+        success: false,
+        preventFollowUp: true,
+        userFacing: "I couldn't prepare your signing document right now. Please try again in a moment.",
+        internal: { success: false, ok: false, error: String(err?.message || err) },
+      };
+    }
   }
 
   @Tool({
@@ -418,17 +469,26 @@ export class ServicingTools {
     description: 'Check document signature status. NEVER call this tool autonomously or in a loop. Only call when the customer explicitly asks to verify or check signature status.',
     inputSchema: z.object({ ticketId: z.string().optional() }),
   })
-  async docusignStatus(input: { ticketId?: string }, _ctx: ExecutionContext) {
-    if (!this.authService.isSessionAuthenticated()) {
-      return { success: false, userFacing: 'Please provide your mobile number or email address so I can send a verification code.', internal: { success: false, authenticated: false } };
+  async docusignStatus(_input: { ticketId?: string }, ctx: ExecutionContext) {
+    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    if (!ticketId) return { success: false, ...unauthenticatedResult() };
+
+    try {
+      const result = await this.signingService.signatureStatus(ticketId);
+      return {
+        success: true,
+        preventFollowUp: true,
+        internal: { ...result, success: true },
+        userFacing: result.signed ? 'Your document has been signed and recorded.' : 'Document signature is still pending.',
+      };
+    } catch (err: any) {
+      console.error('[signing] signatureStatus failed:', err?.message || err);
+      return {
+        success: false,
+        preventFollowUp: true,
+        internal: { success: false, ok: false, error: String(err?.message || err) },
+        userFacing: "I couldn't check the signature status right now. Please try again in a moment.",
+      };
     }
-    const ticketId = this.authService.getVerifiedTicketId() || input.ticketId || 'HQ-DEMO-001';
-    const result = await this.servicingService.docusignStatus(ticketId);
-    return {
-      success: result.ok,
-      preventFollowUp: true,
-      internal: { ...result, ticketId },
-      userFacing: result.signed ? 'Your document has been signed and recorded.' : 'Document signature is still pending.',
-    };
   }
 }

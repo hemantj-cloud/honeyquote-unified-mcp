@@ -15,6 +15,11 @@ function calendarDaysUntil(yyyyMmDd?: string): number | null {
   return Math.round((expiry - today) / 86400000);
 }
 
+function formatDocumentLabel(doc: string): string {
+  const text = String(doc || '').replace(/[_-]+/g, ' ').trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1).toLowerCase() : text;
+}
+
 function ymdUtcFromOffset(dayOffset: number): string {
   const n = new Date();
   const utc = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()) + dayOffset * 86400000;
@@ -60,34 +65,35 @@ export default function PolicyServicingWidget() {
 
   const isUnauthenticated = sdkOutput?.internal?.authenticated === false;
 
-  // Dynamic height reporting to parent frame
+  // Report the card's height to the NitroChat iframe whenever its content resizes (data,
+  // tabs, notices, fonts), so the frame never keeps a stale, taller height.
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastHeight = -1;
     const notifyHeight = () => {
-      const widgetId = (window as any).openai?.widgetId;
-      if (containerRef.current) {
-        const height = containerRef.current.scrollHeight + 28;
-        window.parent.postMessage(
-          {
-            type: 'nitro:set_height',
-            widgetId: widgetId,
-            height: isUnauthenticated ? 0 : Math.max(height, 370),
-          },
-          '*'
-        );
-      }
+      const height = isUnauthenticated ? 0 : Math.max(el.scrollHeight + 28, 370);
+      if (height === lastHeight) return;
+      lastHeight = height;
+      window.parent.postMessage(
+        { type: 'nitro:set_height', widgetId: (window as any).openai?.widgetId, height },
+        '*'
+      );
     };
-
     notifyHeight();
-    const timer = setTimeout(notifyHeight, 250);
-    return () => clearTimeout(timer);
+    const observer = new ResizeObserver(notifyHeight);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [isUnauthenticated]);
 
   // Extract structured internal data
   const rawInternal = sdkOutput?.internal || sdkOutput || {};
   const activeInternal = rawInternal;
 
-  // Property confirmation details are presented conversationally in the chat message
-  const isPropertyConfirmation = false;
+  const isPropertyConfirmation = Boolean(
+    activeInternal.awaitingPropertyConfirmation === true ||
+    activeInternal.stage === 'awaiting_property_confirmation'
+  );
   const propertyAttrs = activeInternal.propertyAttributes || {};
   const confirmationAddress = propertyAttrs.address || activeInternal.propertyAddress || activeInternal.address;
   const confirmationRoof =
@@ -104,7 +110,11 @@ export default function PolicyServicingWidget() {
   const resolvedRenewalDate = liveRenewalDate || (isStandalonePreview ? ymdUtcFromOffset(13) : undefined);
   const resolvedEffectiveDate =
     liveEffectiveDate || (isStandalonePreview ? ymdUtcFromOffset(-365) : undefined);
-  const daysFromDate = calendarDaysUntil(resolvedRenewalDate);
+  // Prefer the server's count so the card and the chat text always show the same number of days.
+  const daysFromDate =
+    typeof rawInternal.daysUntilExpiry === 'number'
+      ? rawInternal.daysUntilExpiry
+      : calendarDaysUntil(resolvedRenewalDate);
   const resolvedData: PolicyData = {
     ticketId: rawInternal.ticketId || 'HQ-DEMO-001',
     policyNumber: rawInternal.policyNumber || '—',
@@ -167,7 +177,7 @@ export default function PolicyServicingWidget() {
 
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
-  const daysRemaining = calendarDaysUntil(resolvedData.renewalDate);
+  const daysRemaining = daysFromDate;
 
   const isRenewalWindow = Boolean(
     typeof daysRemaining === 'number' &&
@@ -196,9 +206,7 @@ export default function PolicyServicingWidget() {
     Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed')
   );
   const [, setIsEsignSent] = useState<boolean>(Boolean(resolvedData.esignSent));
-  const [isMortgageBilled, setIsMortgageBilled] = useState<boolean>(
-    Boolean(resolvedData.billedToMortgage)
-  );
+  const isPaidViaStripe = rawInternal.paid === true || resolvedData.status === 'IN_FORCE_RENEWED';
 
   const [signatureSigned, setSignatureSigned] = useState(rawInternal.signatureStatus === 'signed');
   const [awaitingSignature, setAwaitingSignature] = useState(false);
@@ -220,18 +228,29 @@ export default function PolicyServicingWidget() {
     setSignatureSigned(rawInternal.signatureStatus === 'signed');
     setSignatureNeeded(Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed'));
   }, [resolvedData.ticketId, resolvedData.signatureRequired, rawInternal.signatureStatus]);
+  const signingStatusUrl: string = rawInternal.signingStatusUrl || '';
+  const announcedRef = useRef(false);
   useEffect(() => {
-    if (!canManageSignature || !signatureNeeded) return;
+    if (!canManageSignature || !signatureNeeded || !signingStatusUrl) return;
     let active = true;
     let attempts = 0;
+    // Plain fetch, not callTool: tool calls render in the chat, so polling through
+    // them would post a "still pending" message every few seconds.
     const refresh = async () => {
       try {
-        const result = await callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId });
-        if (active && result.signed) {
+        const resp = await fetch(`${signingStatusUrl}?ticketId=${encodeURIComponent(resolvedData.ticketId || '')}`);
+        if (!resp.ok) return;
+        const result = await resp.json();
+        if (active && result?.signed) {
           setSignatureNeeded(false);
           setSignatureSigned(true);
           setAwaitingSignature(false);
           setActionNotice('Document signed.');
+          // One chat-visible status call so the assistant's text matches the card.
+          if (!announcedRef.current) {
+            announcedRef.current = true;
+            void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {});
+          }
         }
       } catch {}
     };
@@ -243,11 +262,10 @@ export default function PolicyServicingWidget() {
       void refresh();
     }, 5000) : undefined;
     return () => { active = false; clearInterval(timer); window.removeEventListener('focus', onFocus); };
-  }, [resolvedData.ticketId, canManageSignature, signatureNeeded, awaitingSignature]);
+  }, [resolvedData.ticketId, canManageSignature, signatureNeeded, awaitingSignature, signingStatusUrl]);
 
   const [isSigning, setIsSigning] = useState<boolean>(false);
   const [isUploadingDocs, setIsUploadingDocs] = useState<boolean>(false);
-  const [isVerifyingEscrow, setIsVerifyingEscrow] = useState<boolean>(false);
   const [isGeneratingCOI, setIsGeneratingCOI] = useState<boolean>(false);
   const [isSubmittingEndorsement, setIsSubmittingEndorsement] = useState<boolean>(false);
   const [endorsementPending, setEndorsementPending] = useState<boolean>(false);
@@ -268,28 +286,6 @@ export default function PolicyServicingWidget() {
     sdkOutput?.insuredEmail ||
     (typeof window !== 'undefined' && localStorage.getItem('hq_verified_email')) ||
     '';
-
-  // Dynamic height reporting when tab or interactive state changes
-  useEffect(() => {
-    const notifyHeight = () => {
-      const widgetId = (window as any).openai?.widgetId;
-      if (containerRef.current) {
-        const height = containerRef.current.scrollHeight + 28;
-        window.parent.postMessage(
-          {
-            type: 'nitro:set_height',
-            widgetId: widgetId,
-            height: Math.max(height, 370),
-          },
-          '*'
-        );
-      }
-    };
-
-    notifyHeight();
-    const timer = setTimeout(notifyHeight, 150);
-    return () => clearTimeout(timer);
-  }, [activeTab, actionNotice, missingDocs, signatureNeeded, isMortgageBilled, endorsementPending, isRenewing, renewalTriggered, isRenewalWindow]);
 
   // Handler: Policy Renewal trigger to parent conversational agent (Step 3 Handshake)
   const handleRenewPolicy = async () => {
@@ -339,38 +335,36 @@ export default function PolicyServicingWidget() {
   };
 
   // Handler: DocuSign Electronic Signature
-  const handleSignDocuSign = async (delivery: 'direct' | 'sms' = 'direct') => {
-    if (isSigning || !canManageSignature || !signatureNeeded || signatureSigned) return;
+  const handleSignDocuSign = async () => {
+    if (isSigning || !canManageSignature || (!signatureNeeded && !signatureSigned)) return;
     setIsSigning(true);
-    setActionNotice(delivery === 'sms' ? 'Sending signing links by SMS...' : 'Preparing your document...');
+    setActionNotice('Preparing your document...');
 
     try {
-      // Dispatch real DocuSign send via servicing backend
-      // Fallback local port 3012
-      // Fallback via MCP tool if available
-      // Non-blocking
-      const result = await callSigningTool('hq_docusign_send', { ticketId: resolvedData.ticketId, delivery });
+      const signAgain = signatureSigned === true;
+      const result = await callSigningTool('hq_docusign_send', { force: signAgain });
       if (result.signed) {
         setSignatureNeeded(false);
         setSignatureSigned(true);
         setActionNotice('Document signed.');
         return;
       }
-      // Optimistically update local servicing checklist state
-      setIsEsignSent(true);
-      // Open secure DocuSign signing envelope in a new window
-      if (delivery === 'direct') {
-        if (!result.signingUrl) throw new Error('No signing link returned');
-        const url = new URL(result.signingUrl);
-        if (url.protocol !== 'https:') throw new Error('Invalid signing link');
-        const sdk = (window as any).openai;
-        if (typeof sdk?.openExternal === 'function') sdk.openExternal({ href: url.href });
-        else window.open(url.href, '_blank', 'noopener,noreferrer');
+      if (signAgain) {
+        setSignatureSigned(false);
+        setSignatureNeeded(true);
+        announcedRef.current = false;
       }
-      setActionNotice(delivery === 'sms' ? 'Signing and chatbot links sent by SMS. Awaiting signature.' : 'DocuSign opened. Status will update after signing.');
+      setIsEsignSent(true);
+      if (!result.signingUrl) throw new Error('No signing link returned');
+      const url = new URL(result.signingUrl);
+      if (url.protocol !== 'https:') throw new Error('Invalid signing link');
+      const sdk = (window as any).openai;
+      if (typeof sdk?.openExternal === 'function') sdk.openExternal({ href: url.href });
+      else window.open(url.href, '_blank', 'noopener,noreferrer');
+      setActionNotice('DocuSign opened. Status will update after signing.');
       setAwaitingSignature(true);
     } catch {
-      setActionNotice('Unable to prepare signing or send the SMS. Please try again or contact support.');
+      setActionNotice('Unable to prepare signing. Please try again or contact support.');
     } finally {
       setIsSigning(false);
     }
@@ -460,49 +454,6 @@ export default function PolicyServicingWidget() {
     }
   };
 
-  // Handler: Mortgage Escrow Verification
-  const handleVerifyEscrow = async () => {
-    if (isVerifyingEscrow) return;
-    setIsVerifyingEscrow(true);
-    setActionNotice('Verifying mortgage escrow billing with Freedom Mortgage Servicing...');
-
-    try {
-      try {
-        await fetch(`${workflowApiUrl}/api/policy/escrow/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticketId: resolvedData.ticketId,
-            mortgagee: 'Freedom Mortgage Servicing',
-          }),
-        });
-      } catch {
-        try {
-          await fetch('http://localhost:3012/api/policy/escrow/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ticketId: resolvedData.ticketId,
-              mortgagee: 'Freedom Mortgage Servicing',
-            }),
-          });
-        } catch {
-          // Non-blocking
-        }
-      }
-
-      setIsMortgageBilled(true);
-      setActionNotice('✅ Mortgage escrow billing verified with Freedom Mortgage Servicing.');
-      setTimeout(() => setActionNotice(null), 6000);
-    } catch {
-      setIsMortgageBilled(true);
-      setActionNotice('Mortgage escrow verified.');
-      setTimeout(() => setActionNotice(null), 4000);
-    } finally {
-      setIsVerifyingEscrow(false);
-    }
-  };
-
   // Handler: Download Certificate of Insurance (COI)
   const handleDownloadCOI = async () => {
     if (isGeneratingCOI) return;
@@ -589,10 +540,10 @@ APPLICABLE DEDUCTIBLES:
 Hurricane / Named Windstorm:       ${hurricaneDeductible}
 All Other Perils (AOP):            ${aopDeductible}
 
-MORTGAGE ESCROW & BILLING:
+BILLING:
 --------------------------------------------------------------------------------
-Mortgagee:                         Freedom Mortgage Servicing
-Billing Status:                    Billed to Mortgage Escrow (Verified Active)
+Billing Method:                    Direct Homeowner Pay (Stripe)
+Billing Status:                    ${isPaidViaStripe ? 'Paid via Stripe' : 'Payment due at renewal'}
 
 CERTIFICATE HOLDER NOTICE:
 --------------------------------------------------------------------------------
@@ -865,7 +816,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           <button
             type="button"
             onClick={handleRenewPolicy}
-            disabled={isRenewing || renewalTriggered}
+            disabled={isRenewing || renewalTriggered || isPropertyConfirmation}
             style={{
               padding: '9px 20px',
               fontSize: '12.5px',
@@ -874,8 +825,8 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               background: '#276152',
               color: '#FFFFFF',
               border: 'none',
-              cursor: (isRenewing || renewalTriggered) ? 'not-allowed' : 'pointer',
-              opacity: (isRenewing || renewalTriggered) ? 0.75 : 1,
+              cursor: (isRenewing || renewalTriggered || isPropertyConfirmation) ? 'not-allowed' : 'pointer',
+              opacity: (isRenewing || renewalTriggered || isPropertyConfirmation) ? 0.75 : 1,
               boxShadow: '0 3px 10px rgba(39, 97, 82, 0.28)',
               transition: 'all 0.15s ease',
               display: 'flex',
@@ -890,7 +841,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 <span>⏳</span>
                 <span>Initiating Renewal...</span>
               </>
-            ) : renewalTriggered ? (
+            ) : (renewalTriggered || isPropertyConfirmation) ? (
               <>
                 <span>✅</span>
                 <span>Renewal Started</span>
@@ -954,7 +905,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           }}
         >
           <span>Servicing Tasks</span>
-          {hasServicingNotification && (signatureNeeded || missingDocs.length > 0 || !isMortgageBilled) && (
+          {hasServicingNotification && (signatureNeeded || missingDocs.length > 0) && (
             <span
               style={{
                 width: '7px',
@@ -1071,7 +1022,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
             <div style={{ flex: 1, minWidth: '160px' }}>
               <div style={{ fontSize: '11.5px', fontWeight: 500, color: colors.textSecondary }}>🏦 Premium Billing Method</div>
               <div style={{ fontSize: '15px', fontWeight: 700, color: '#1B493D', marginTop: '3px' }}>
-                {isMortgageBilled ? 'Mortgage Escrow (Paid)' : 'Direct Homeowner Pay'}
+                {isPaidViaStripe ? 'Paid via Stripe' : 'Direct Homeowner Pay'}
               </div>
             </div>
           </div>
@@ -1102,38 +1053,19 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>DocuSign Electronic Signature</span>
-                    <span
-                      style={{
-                        fontSize: '10px',
-                        fontWeight: 700,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.04em',
-                        padding: '2px 7px',
-                        borderRadius: '100px',
-                        background: isDark ? 'rgba(255, 255, 255, 0.08)' : '#F4ECDE',
-                        color: colors.textSecondary,
-                        border: `1px solid ${colors.border}`,
-                      }}
-                    >
-                      Optional
-                    </span>
                   </div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
                     {signatureNeeded
-                      ? 'Optional: Application requires electronic signature if requesting policy modifications'
+                      ? 'Your renewal document needs your electronic signature'
                       : signatureSigned ? 'Document signed' : 'No signature currently required'}
                   </div>
                 </div>
               </div>
-              {canManageSignature && signatureNeeded && !signatureSigned && (
+              {canManageSignature && (signatureNeeded || signatureSigned) && (
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                <button type="button" onClick={() => handleSignDocuSign('sms')} disabled={isSigning}
-                  style={{ padding: '7px 16px', borderRadius: '100px', border: `1px solid ${colors.border}`, cursor: isSigning ? 'not-allowed' : 'pointer' }}>
-                  Send eSign Document
-                </button>
                 <button
                   type="button"
-                  onClick={() => handleSignDocuSign('direct')}
+                  onClick={() => handleSignDocuSign()}
                   disabled={isSigning}
                   style={{
                     padding: '7px 16px',
@@ -1149,7 +1081,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                     transition: 'all 0.15s ease',
                   }}
                 >
-                  {isSigning ? 'Preparing...' : 'Sign Now'}
+                  {isSigning ? 'Preparing...' : signatureSigned ? 'Sign Again' : 'Sign Now'}
                 </button>
                 </div>
               )}
@@ -1176,7 +1108,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                   <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Supporting Documents</div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
                     {missingDocs.length > 0
-                      ? `Missing: ${missingDocs.join(', ')}`
+                      ? `Missing: ${missingDocs.map(formatDocumentLabel).join(', ')}`
                       : 'All required documents verified'}
                   </div>
                 </div>
@@ -1213,7 +1145,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               )}
             </div>
 
-            {/* Escrow Status */}
+            {/* Renewal Payment Status */}
             <div
               style={{
                 display: 'flex',
@@ -1221,59 +1153,37 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 justifyContent: 'space-between',
                 padding: '14px 16px',
                 borderRadius: '12px',
-                background: isMortgageBilled ? colors.successBg : colors.warningBg,
-                border: `1px solid ${isMortgageBilled ? colors.successBorder : colors.warningBorder}`,
+                background: isPaidViaStripe ? colors.successBg : colors.warningBg,
+                border: `1px solid ${isPaidViaStripe ? colors.successBorder : colors.warningBorder}`,
                 gap: '12px',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span style={{ fontSize: '20px' }}>🏦</span>
+                <span style={{ fontSize: '20px' }}>💳</span>
                 <div>
-                  <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Mortgage Escrow Verification</div>
+                  <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Renewal Payment</div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
-                    {isMortgageBilled
-                      ? 'Carrier has invoiced your mortgage escrow account directly'
-                      : 'Action Required: Verify mortgage escrow account for automated billing'}
+                    {isPaidViaStripe
+                      ? 'Renewal premium paid securely via Stripe'
+                      : 'Renewal premium is due at Stripe checkout'}
                   </div>
                 </div>
               </div>
-              {isMortgageBilled ? (
-                <span
-                  style={{
-                    fontSize: '11px',
-                    color: '#1B493D',
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    padding: '3px 10px',
-                    borderRadius: '100px',
-                    background: '#FFFFFF',
-                    border: '1px solid #B8E2CB',
-                  }}
-                >
-                  Verified
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleVerifyEscrow}
-                  disabled={isVerifyingEscrow}
-                  style={{
-                    padding: '7px 16px',
-                    fontSize: '12.5px',
-                    fontWeight: 600,
-                    borderRadius: '100px',
-                    background: '#276152',
-                    color: '#FFFFFF',
-                    border: 'none',
-                    cursor: isVerifyingEscrow ? 'not-allowed' : 'pointer',
-                    opacity: isVerifyingEscrow ? 0.75 : 1,
-                    transition: 'all 0.15s ease',
-                  }}
-                >
-                  {isVerifyingEscrow ? 'Verifying...' : 'Verify Escrow'}
-                </button>
-              )}
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: isPaidViaStripe ? '#1B493D' : '#8A4A00',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  padding: '3px 10px',
+                  borderRadius: '100px',
+                  background: '#FFFFFF',
+                  border: `1px solid ${isPaidViaStripe ? '#B8E2CB' : colors.warningBorder}`,
+                }}
+              >
+                {isPaidViaStripe ? 'Paid' : 'Due'}
+              </span>
             </div>
           </div>
         </div>
@@ -1300,6 +1210,80 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
 
 
 
+      {isPropertyConfirmation && (
+        <div
+          style={{
+            background: colors.cardBg,
+            border: `1px solid ${colors.border}`,
+            borderRadius: '14px',
+            padding: '16px 18px',
+            marginBottom: '16px',
+          }}
+        >
+          <div
+            style={{
+              fontSize: '13.5px',
+              fontWeight: 700,
+              color: colors.textPrimary,
+              marginBottom: '4px',
+              letterSpacing: '-0.01em',
+            }}
+          >
+            Property Details on File
+          </div>
+          <div
+            style={{
+              fontSize: '12px',
+              color: colors.textSecondary,
+              marginBottom: '12px',
+              lineHeight: 1.45,
+            }}
+          >
+            Please confirm they're still accurate before your renewal checkout is prepared:
+          </div>
+          <ul
+            style={{
+              margin: 0,
+              paddingLeft: '18px',
+              fontSize: '12.5px',
+              color: colors.textPrimary,
+              lineHeight: 1.9,
+            }}
+          >
+            <li><strong>Property Address:</strong> {confirmationAddress || 'Not available on record'}</li>
+            <li><strong>Year Built:</strong> {propertyAttrs.yearBuilt || 'Not available on record'}</li>
+            <li><strong>Square Footage:</strong> {confirmationSqft}</li>
+            <li><strong>Construction Type:</strong> {propertyAttrs.constructionType || 'Not available on record'}</li>
+            <li><strong>Roof Geometry &amp; Age:</strong> {confirmationRoof}</li>
+            <li><strong>Primary Use:</strong> {propertyAttrs.primaryUse || 'Not available on record'}</li>
+            {propertyAttrs.stories ? <li><strong>Stories:</strong> {propertyAttrs.stories}</li> : null}
+            {propertyAttrs.primaryHeating ? <li><strong>Heating:</strong> {propertyAttrs.primaryHeating}</li> : null}
+            {propertyAttrs.plumbingSystem ? <li><strong>Plumbing:</strong> {propertyAttrs.plumbingSystem}</li> : null}
+            {propertyAttrs.electricalPanel ? (
+              <li>
+                <strong>Electrical Panel:</strong>{' '}
+                {String(propertyAttrs.electricalPanel).replace(/([a-z])([A-Z])/g, '$1 $2')}
+              </li>
+            ) : null}
+          </ul>
+          <div
+            style={{
+              marginTop: '12px',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              background: colors.stripBg,
+              border: `1px solid ${colors.border}`,
+              fontSize: '12.5px',
+              fontWeight: 600,
+              color: '#276152',
+              textAlign: 'center',
+            }}
+          >
+            Are these details still accurate? Reply <strong>yes</strong> in the chat to continue to secure checkout.
+          </div>
+        </div>
+      )}
+
       {/* Footer Action Bar - HoneyQuote rounded button style */}
       <div
         style={{
@@ -1312,10 +1296,10 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           flexWrap: 'wrap',
         }}
       >
-        {canManageSignature && signatureNeeded && !signatureSigned && (
+        {canManageSignature && (signatureNeeded || signatureSigned) && (
           <button
             type="button"
-            onClick={() => handleSignDocuSign('direct')}
+            onClick={() => handleSignDocuSign()}
             disabled={isSigning}
             style={{
               flexBasis: '100%',
@@ -1340,14 +1324,10 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
             <span>
               {isSigning
                 ? 'Opening DocuSign...'
-                : 'Sign Now — signature needed on 1 document'}
+                : signatureSigned
+                  ? 'Sign Again — send a new document'
+                  : 'Sign Now — signature needed on 1 document'}
             </span>
-          </button>
-        )}
-        {canManageSignature && signatureNeeded && !signatureSigned && (
-          <button type="button" onClick={() => handleSignDocuSign('sms')} disabled={isSigning}
-            style={{ padding: '9px 18px', borderRadius: '100px', border: `1px solid ${colors.border}`, cursor: isSigning ? 'not-allowed' : 'pointer' }}>
-            Send eSign Document
           </button>
         )}
         {canManageSignature && signatureSigned && <span>Document signed</span>}

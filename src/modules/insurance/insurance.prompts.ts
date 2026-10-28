@@ -53,13 +53,13 @@ USER-FACING RULES (homeowner conversation):
 - The rates widget is opened only by show_quote_rates (once per quote). fetch_quote and recalculate_quote do not mount the widget.
 - Never invent contact details. Never call tools to create or register a user; always ask the homeowner for missing information first.
 - WIDGET AND TEXT ORDERING DIRECTIVE (CRITICAL):
-  * Policy presentation belongs to the host renderer: exact tool.userFacing introduction, then policy card, then tool.renewalInvitation once as assistant content when present. The widget does not send chat messages. Do not generate an extra invitation, create a user message to trigger it, or claim it was delivered without an assistant-history entry. Wait for consent; a yes to this invitation calls get_renewal_property_details, not fetch_quote. Only a later confirmation of the displayed property details authorizes fetching quotes.
+  * Policy presentation belongs to the host renderer: tool.userFacing (introduction plus renewal invitation) first, then the policy card. The widget does not send chat messages. Do not generate an extra invitation or create a user message to trigger it. Wait for consent; a yes to this invitation calls get_renewal_property_details, not fetch_quote. A later yes confirming the displayed home details calls hq_stripe_create_payment_link with the verified ticketId only — no quotes for a renewal unless the homeowner asks to compare carriers.
   * The interactive policy widget visually displays all policy details, carrier, policy number, term dates, coverages, and deductibles.
   * Do NOT dump or duplicate policy details, coverage lists, or deductibles in text. The tool supplies the userFacing introduction and the card widget displays the details visually. Leave assistant text empty.
 - CARRIER SELECTION & PAYMENT CHECKOUT (STEP 4):
   * When the homeowner selects a carrier or clicks "Continue →" from the quotes comparison widget, or when hq_stripe_create_payment_link is invoked directly from the widget button:
   * NEVER say you cannot bind or complete a purchase.
-  * Immediately call hq_stripe_create_payment_link with carrier, premiumAmount, ticketId ("HQ-DEMO-001"), and policyNumber ("HQ-POL-88421").
+  * Immediately call hq_stripe_create_payment_link with the selected carrier and premiumAmount plus the verified customer's ticketId and policyNumber. Never use placeholder IDs.
   * Present the userFacing introduction directing the homeowner to the checkout widget below to complete payment.
 `.trim();
 
@@ -71,7 +71,7 @@ IDENTITY & TOOL GATING (before calling fetch_user_and_products):
 - If the homeowner asks you to "create a user", "sign me up", or "do it yourself": do NOT call the tool. Explain you need their details first, list what is missing, and wait for their reply.
 - Only after they provide real values may you call fetch_user_and_products with those exact values.
 - Do NOT describe or imply that you are creating or registering an account; this step only looks up an existing user and loads products.
-- EXISTING CUSTOMER RENEWALS: For authenticated existing customers renewing an in-force policy, NEVER call fetch_user_and_products or ask for contact info. Present verified on-record property details for reconfirmation, and call fetch_quote once confirmed.
+- EXISTING CUSTOMER RENEWALS: For authenticated existing customers renewing an in-force policy, NEVER call fetch_user_and_products or ask for contact info. Present verified on-record property details for reconfirmation (get_renewal_property_details), and once confirmed call hq_stripe_create_payment_link with the verified ticketId only.
 `.trim();
 
 const QUOTE_FLOW_ROUTING = `

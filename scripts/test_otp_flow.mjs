@@ -1,133 +1,80 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// Offline OTP flow checks against the built service. Twilio is blanked so no SMS is sent,
+// and email delivery is captured by a fake sender instead of Gmail.
+process.env.TWILIO_ACCOUNT_SID = '';
+process.env.TWILIO_AUTH_TOKEN = '';
+process.env.TWILIO_VERIFY_SERVICE_SID = '';
+process.env.NODE_ENV = 'production';
 
-import { ServicingAuthService } from '../dist/modules/servicing/servicing.auth.service.js';
+const { ServicingAuthService } = await import('../dist/modules/servicing/servicing.auth.service.js');
+const { TicketRepository } = await import('../dist/modules/persistence/ticket.repository.js');
 
-async function runTests() {
-  console.log('--- STARTING HONEYQUOTE OTP FLOW TESTS ---\n');
-  const auth = new ServicingAuthService();
+const outbox = [];
+const fakeEmail = {
+  deliver: true,
+  async sendEmail(message) {
+    if (!this.deliver) return { success: true, simulated: true };
+    outbox.push(message);
+    return { success: true, messageId: `TEST-${outbox.length}` };
+  },
+};
+const lastCode = () => outbox.at(-1)?.body.match(/\b(\d{6})\b/)?.[1];
 
-  const codesToTest = ['489923', '182055', '772901', '624993'];
-  let passed = 0;
-  let total = 0;
+const repo = new TicketRepository();
+const auth = new ServicingAuthService(repo, fakeEmail);
+const ticket = await repo.getTicketContext('HQ-DEMO-001');
+const email = ticket.recipientEmail;
 
-  // Test 1: Challenge creation rotation
-  total++;
-  const challenge1 = await auth.createOtpChallenge('+919503760623');
-  console.log(`[Test 1] Generated Challenge Code: ${challenge1.code}`);
-  if (codesToTest.includes(challenge1.code)) {
-    console.log('✓ Challenge code belongs to approved production pool');
+let passed = 0;
+let failed = 0;
+function check(name, ok, detail) {
+  if (ok) {
     passed++;
+    console.log(`✓ ${name}`);
   } else {
-    console.error(`✗ Challenge code ${challenge1.code} not in approved pool`);
-  }
-
-  // Test 2-5: Test each of the 4 OTP codes directly
-  for (const code of codesToTest) {
-    total++;
-    await auth.createOtpChallenge('+919503760623');
-    const res = await auth.verifyOtp('+919503760623', code, `test-session-${code}`);
-    if (res.verified && res.ticketId === 'HQ-DEMO-001' && res.customerName === 'Jordan Mitchell') {
-      console.log(`✓ Code ${code} successfully authenticated session`);
-      passed++;
-    } else {
-      console.error(`✗ Code ${code} failed verification:`, res);
-    }
-  }
-
-  // Test 6: Invalid code rejection
-  total++;
-  await auth.createOtpChallenge('+919503760623');
-  const invalidRes = await auth.verifyOtp('+919503760623', '000000', 'invalid-session');
-  if (!invalidRes.verified && invalidRes.error?.includes('invalid or expired')) {
-    console.log(`✓ Invalid code 000000 correctly rejected with message: "${invalidRes.error}"`);
-    passed++;
-  } else {
-    console.error('✗ Invalid code was not handled as expected:', invalidRes);
-  }
-
-  // Test 7: Normalization test (+919503760623 -> 9503760623)
-  total++;
-  await auth.createOtpChallenge('+91 95037 60623');
-  const normRes = await auth.verifyOtp('9503760623', '489923', 'norm-session-1');
-  if (normRes.verified) {
-    console.log('✓ Normalization (+91 95037 60623 challenge -> 9503760623 verify) succeeded');
-    passed++;
-  } else {
-    console.error('✗ Normalization failed:', normRes);
-  }
-
-  // Test 8: Normalization test (raw digits -> international prefix)
-  total++;
-  await auth.createOtpChallenge('9503760623');
-  const normRes2 = await auth.verifyOtp('+919503760623', '772901', 'norm-session-2');
-  if (normRes2.verified) {
-    console.log('✓ Normalization (9503760623 challenge -> +919503760623 verify) succeeded');
-    passed++;
-  } else {
-    console.error('✗ Normalization 2 failed:', normRes2);
-  }
-
-  // Test 9: Active authenticated session state
-  total++;
-  if (auth.isSessionAuthenticated('norm-session-2')) {
-    console.log(`✓ Session isSessionAuthenticated confirmed. Ticket ID: ${auth.getVerifiedTicketId('norm-session-2')}`);
-    passed++;
-  } else {
-    console.error('✗ Session not marked authenticated');
-  }
-
-  // Test 10: Email identifier routes to email channel
-  total++;
-  const emailChallenge = await auth.createOtpChallenge('hemantj@wekancode.com');
-  if (emailChallenge.channel === 'email' && codesToTest.includes(emailChallenge.code)) {
-    console.log(`✓ Email identifier produced email-channel challenge with pooled code ${emailChallenge.code}`);
-    passed++;
-  } else {
-    console.error('✗ Email challenge did not report email channel:', emailChallenge);
-  }
-
-  // Test 11: Email identifier verifies via issued challenge code
-  total++;
-  const emailVerify = await auth.verifyOtp('hemantj@wekancode.com', emailChallenge.code, 'email-session-1');
-  if (emailVerify.verified && emailVerify.ticketId === 'HQ-DEMO-001') {
-    console.log('✓ Email challenge code successfully authenticated session');
-    passed++;
-  } else {
-    console.error('✗ Email challenge code failed verification:', emailVerify);
-  }
-
-  // Test 12: Email normalization (case + whitespace)
-  total++;
-  const mixedChallenge = await auth.createOtpChallenge('  HemantJ@Wekancode.COM ');
-  const mixedVerify = await auth.verifyOtp('hemantj@wekancode.com', mixedChallenge.code, 'email-session-2');
-  if (mixedChallenge.channel === 'email' && mixedVerify.verified) {
-    console.log('✓ Email normalization (mixed case/whitespace) succeeded');
-    passed++;
-  } else {
-    console.error('✗ Email normalization failed:', { challenge: mixedChallenge, verify: mixedVerify });
-  }
-
-  // Test 13: requestOtp degrades gracefully without a servicing backend
-  total++;
-  const reqResult = await auth.requestOtp('customer@example.com');
-  if (reqResult.channel === 'email' && reqResult.sent === false) {
-    console.log('✓ requestOtp returns channel + soft-fail when servicing API is unreachable');
-    passed++;
-  } else {
-    console.error('✗ requestOtp did not degrade gracefully:', reqResult);
-  }
-
-  console.log(`\n--- TEST SUMMARY: ${passed}/${total} PASSED ---`);
-  if (passed === total) {
-    console.log('ALL TESTS PASSED WITH 100% FIDELITY!');
-    process.exit(0);
-  } else {
-    process.exit(1);
+    failed++;
+    console.error(`✗ ${name}`, detail ?? '');
   }
 }
 
-runTests().catch(err => {
-  console.error('Test execution error:', err);
-  process.exit(1);
-});
+const noSession = await auth.requestOtp(email, undefined);
+check('no session: code is not sent', !noSession.sent && noSession.reason === 'no_session', noSession);
+
+const unknown = await auth.requestOtp('nobody@example.com', 'chat-a');
+check('unknown contact: not_found and nothing sent', !unknown.sent && unknown.reason === 'not_found' && outbox.length === 0, unknown);
+
+const sent = await auth.requestOtp(`  ${email.toUpperCase()} `, 'chat-a');
+const code = lastCode();
+check('email on file: code emailed to the ticket address', sent.sent && outbox.at(-1)?.to === email && /^\d{6}$/.test(code || ''), { sent, outbox });
+
+const resend = await auth.requestOtp(email, 'chat-a');
+check('immediate resend is rate limited', !resend.sent && resend.reason === 'rate_limited', resend);
+
+const otherChat = await auth.verifyOtp(code, 'chat-b');
+check('code from chat A is rejected in chat B', !otherChat.verified && !auth.isSessionAuthenticated('chat-b'), otherChat);
+
+const wrong = await auth.verifyOtp(code === '000000' ? '111111' : '000000', 'chat-a');
+check('wrong code is rejected with attempts left', !wrong.verified && /attempts? left/.test(wrong.error), wrong);
+
+const right = await auth.verifyOtp(code, 'chat-a');
+check('correct code verifies the ticket owner', right.verified && right.ticketId === 'HQ-DEMO-001', right);
+check('chat A is authenticated, chat B is not', auth.isSessionAuthenticated('chat-a') && !auth.isSessionAuthenticated('chat-b'));
+
+const reuse = await auth.verifyOtp(code, 'chat-c');
+check('used code cannot be replayed in another chat', !reuse.verified, reuse);
+
+await auth.requestOtp(email, 'chat-d');
+const lockedCode = lastCode();
+let last;
+for (let i = 0; i < 5; i++) last = await auth.verifyOtp(lockedCode === '000000' ? '111111' : '000000', 'chat-d');
+const afterLock = await auth.verifyOtp(lockedCode, 'chat-d');
+check('5 wrong attempts lock the code', /Too many/.test(last.error) && !afterLock.verified, { last, afterLock });
+
+fakeEmail.deliver = false;
+const undelivered = await auth.requestOtp(email, 'chat-e');
+check('simulated email in production counts as delivery_failed', !undelivered.sent && undelivered.reason === 'delivery_failed', undelivered);
+
+const sms = await auth.requestOtp(ticket.customerPhone, 'chat-f');
+check('SMS without Twilio configured is delivery_failed', !sms.sent && sms.channel === 'sms' && sms.reason === 'delivery_failed', sms);
+
+console.log(`\n${passed}/${passed + failed} passed`);
+process.exit(failed ? 1 : 0);
