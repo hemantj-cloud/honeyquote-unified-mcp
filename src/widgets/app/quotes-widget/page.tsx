@@ -15,6 +15,7 @@ type QuoteCard = {
 type QuoteWidgetInternal = {
   showWidget?: boolean;
   ratesStreamUrl?: string;
+  ticketId?: string;
 };
 
 type QuoteWidgetOutput = {
@@ -156,6 +157,19 @@ function mapRateToCard(rate: QuoteRateEvent): QuoteCard {
   };
 }
 
+function quoteDetailRows(quote: QuoteCard): { label: string; value: string }[] {
+  const [aopPart, hurricanePart] = quote.deductiblesLabel.split('/').map((part) => part.trim());
+  const allOtherPerils = aopPart.replace(/\s*AOP\s*$/i, '').trim() || quote.deductiblesLabel;
+  const hurricane = hurricanePart?.replace(/\s*HUR\s*$/i, '').trim();
+
+  return [
+    { label: 'Dwelling', value: quote.dwellingLabel },
+    { label: 'All other perils', value: allOtherPerils },
+    ...(hurricane ? [{ label: 'Hurricane', value: hurricane }] : []),
+    { label: 'Annual premium', value: `$${quote.premiumLabel}` },
+  ];
+}
+
 function mergeQuotes(current: QuoteCard[], next: QuoteCard[]) {
   const merged = new Map(current.map((quote) => [quote.id, quote]));
 
@@ -176,6 +190,7 @@ export default function InsuranceQuotesWidget() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const [quotes, setQuotes] = useState<QuoteCard[]>([]);
+  const [expandedQuoteId, setExpandedQuoteId] = useState<string | null>(null);
   const [streamEnded, setStreamEnded] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
 
@@ -199,7 +214,7 @@ export default function InsuranceQuotesWidget() {
     notifyHeight();
     const timer = setTimeout(notifyHeight, 200);
     return () => clearTimeout(timer);
-  }, [quotes, progressPercent, streamEnded]);
+  }, [quotes, progressPercent, streamEnded, expandedQuoteId]);
 
   useEffect(() => {
     if (!ratesStreamUrl) {
@@ -318,10 +333,10 @@ export default function InsuranceQuotesWidget() {
       ? 'Heritage Insurance'
       : quote.id.split('-')[1]?.toUpperCase() || 'Citizens Property Insurance';
 
-    // The server binds checkout to the chat's verified customer; no ticket is sent from here.
     const toolArgs = {
       carrier: carrierName,
       premiumAmount: quote.premiumValue,
+      ...(toolOutput?.internal?.ticketId ? { ticketId: toolOutput.internal.ticketId } : {}),
     };
 
     try {
@@ -401,8 +416,12 @@ export default function InsuranceQuotesWidget() {
     </div>
   );
 
-  const renderQuote = (quote: QuoteCard) => (
+  const renderQuote = (quote: QuoteCard) => {
+    const open = expandedQuoteId === quote.id;
+
+    return (
     <div key={quote.id} className="quoteCard">
+      <div className="cardRow">
       <div className="cardMain">
         <div className="logoWrap">
           <img
@@ -461,12 +480,33 @@ export default function InsuranceQuotesWidget() {
           <span className="buttonArrow">→</span>
         </button>
 
-        <button className="chevronButton" type="button" aria-label="More quote details">
-          <span className="chevronIcon" />
+        <button
+          className="chevronButton"
+          type="button"
+          aria-label={open ? 'Hide quote details' : 'More quote details'}
+          aria-expanded={open}
+          onClick={(event) => {
+            event.stopPropagation();
+            setExpandedQuoteId((current) => (current === quote.id ? null : quote.id));
+          }}
+        >
+          <span className={`chevronIcon${open ? ' chevronIconOpen' : ''}`} />
         </button>
       </div>
+      </div>
+      {open && (
+        <div className="quoteDetails">
+          {quoteDetailRows(quote).map((row) => (
+            <div key={row.label} className="quoteDetail">
+              <span className="quoteDetailLabel">{row.label}</span>
+              <span className="quoteDetailValue">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
-  );
+    );
+  };
 
   if (!shouldRenderWidget(toolOutput)) {
     return null;
@@ -485,19 +525,20 @@ export default function InsuranceQuotesWidget() {
         }
 
         .page {
-          min-height: 100%;
-          background: ${isDark ? '#0D221D' : '#FCF9F5'};
-          padding: 1.5rem 1rem 1.75rem;
+          width: 100%;
+          background: transparent;
           font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
           color: ${isDark ? '#F4ECDE' : '#0D221D'};
-          border-radius: 18px;
-          border: 1px solid ${isDark ? '#234A3F' : '#DBDBCD'};
         }
 
         .widget {
           width: 100%;
-          max-width: 42rem;
+          max-width: 720px;
           margin: 0 auto;
+          background: ${isDark ? '#0D221D' : '#FCF9F5'};
+          padding: 1.5rem 1rem 1.75rem;
+          border-radius: 18px;
+          border: 1px solid ${isDark ? '#234A3F' : '#DBDBCD'};
         }
 
         .streamHeader {
@@ -594,11 +635,49 @@ export default function InsuranceQuotesWidget() {
           border-radius: 0.75rem;
           padding: 0.5rem 1rem;
           display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0;
+          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          box-shadow: 0 2px 6px rgba(13, 34, 29, 0.03);
+        }
+
+        .cardRow {
+          display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 0.85rem;
-          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-          box-shadow: 0 2px 6px rgba(13, 34, 29, 0.03);
+          width: 100%;
+        }
+
+        .quoteDetails {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 0.55rem 1.25rem;
+          margin-top: 0.65rem;
+          padding-top: 0.65rem;
+          border-top: 0.0625rem solid ${isDark ? '#234A3F' : '#DBDBCD'};
+        }
+
+        .quoteDetail {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+        }
+
+        .quoteDetailLabel {
+          font-size: 0.6rem;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: ${isDark ? '#A3B8B0' : '#7A857F'};
+        }
+
+        .quoteDetailValue {
+          margin-top: 0.15rem;
+          font-size: 0.85rem;
+          font-weight: 700;
+          color: ${isDark ? '#F4ECDE' : '#0D221D'};
         }
 
         .quoteCard:hover {
@@ -768,6 +847,11 @@ export default function InsuranceQuotesWidget() {
           border-bottom: 0.1rem solid ${isDark ? '#A3B8B0' : '#7A857F'};
           transform: rotate(45deg);
           margin-top: -0.15rem;
+        }
+
+        .chevronIconOpen {
+          transform: rotate(225deg);
+          margin-top: 0.15rem;
         }
 
         .skeletonCard {

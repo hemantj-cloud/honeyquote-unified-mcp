@@ -58,9 +58,12 @@ export function isAdminOutreachTicket(ticket: SeedTicketContext, now = new Date(
   return true;
 }
 
+const DEFAULT_ESIGN_CHAT_URL =
+  'https://nitrochat-honeyquote-chatapp-chat-6ae1d1b-abhijits-org-33666fb0.app.nitrocloud.ai/try-embed';
+
+/** Outreach chat link. Separate from HQ_CHAT_RETURN_URL, which DocuSign return rewrites off NitroChat. */
 function chatReopenUrl(): string | null {
-  const raw = process.env.HQ_CHAT_RETURN_URL?.trim();
-  if (!raw) return null;
+  const raw = process.env.HQ_ESIGN_CHAT_URL?.trim() || DEFAULT_ESIGN_CHAT_URL;
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
@@ -80,7 +83,7 @@ function messageBody(name: string | undefined, signingUrl: string, chatUrl: stri
     `Hi ${firstName},\n\n` +
     `Your trial e-sign document is ready. Click below to review and sign in DocuSign:\n\n` +
     `${signingUrl}\n\n` +
-    `After signing, you will return to the chat automatically. You can also reopen the chat here:\n\n` +
+    `After signing, you can see the policy updates here:\n\n` +
     `${chatUrl}\n\n` +
     `This link expires in 24 hours.\n\n` +
     `— HoneyQuote Servicing`
@@ -167,7 +170,7 @@ export class EsignAdminService {
     if (!email) return { ok: false, statusCode: 400, error: 'No email address on this ticket.' };
     const result = await this.emailService.sendEmail({
       to: email,
-      subject: 'HQ Trial — Sign your insurance document (DocuSign)',
+      subject: 'HoneyQuote: Sign your insurance document',
       body,
     });
     if (!result.success || result.simulated) {
@@ -185,7 +188,7 @@ export class EsignAdminService {
 
     const sid = process.env.TWILIO_ACCOUNT_SID?.trim();
     const token = process.env.TWILIO_AUTH_TOKEN?.trim();
-    const from = process.env.TWILIO_FROM_NUMBER?.trim();
+    const from = process.env.TWILIO_FROM_NUMBER?.trim() || process.env.TWILIO_PHONE_NUMBER?.trim();
     if (!sid || !token || !from) {
       return { ok: false, statusCode: 503, error: 'SMS is not configured.' };
     }

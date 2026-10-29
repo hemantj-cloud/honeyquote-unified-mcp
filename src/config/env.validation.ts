@@ -24,9 +24,11 @@ export const envSchema = z.object({
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_VERIFY_SERVICE_SID: z.string().optional(),
   TWILIO_FROM_NUMBER: z.string().optional(),
+  TWILIO_PHONE_NUMBER: z.string().optional(),
   DEFAULT_CUSTOMER_PHONE: z.string().default('+919503760623'),
   HQ_ESIGN_ADMIN_TOKEN: z.string().optional(),
   HQ_ESIGN_ADMIN_ORIGIN: z.string().optional(),
+  HQ_ESIGN_CHAT_URL: z.string().optional(),
   // Gmail API
   GMAIL_ENABLED: z.coerce.boolean().default(false),
   GMAIL_CLIENT_ID: z.string().optional(),

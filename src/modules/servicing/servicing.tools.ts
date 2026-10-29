@@ -328,7 +328,7 @@ export class ServicingTools {
   @Tool({
     name: 'update_renewal_property_details',
     description:
-      'Saves customer corrections to the on-record home details during renewal reconfirmation (address, year built, square footage, roof, electrical panel, etc.). Call whenever the customer says ANY displayed detail is wrong or changed, before checkout — never keep a correction only in chat. Pass only the changed fields. It re-shows the updated card; then wait for the customer to confirm before calling hq_stripe_create_payment_link. Add nothing to its message.',
+      'Saves customer corrections to the on-record home details during renewal reconfirmation (address, year built, square footage, roof, electrical panel, etc.). Call whenever the customer says ANY displayed detail is wrong or changed, before checkout — never keep a correction only in chat. Pass only the changed fields. It re-shows the updated card. When propertyDetailsUpdated is true, the turn is still open: call show_quote_rates in that same turn with internal.nextToolArgs and add nothing. Do not wait for the customer to reply. Do not call hq_stripe_create_payment_link until the customer clicks Continue on a carrier.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Verified session ticket ID (e.g. HQ-DEMO-001)'),
       propertyAttributes: z
@@ -400,19 +400,29 @@ export class ServicingTools {
       address: context.propertyAttributes?.address || context.propertyAddress,
     };
 
+    const detailsChanged = updatedFields.length > 0;
+    const firstName = context.customerName?.trim().split(/\s+/)[0] || 'there';
+    const formattedAddress = String(attrs.address || '').trim();
+    // A change must keep the turn open so the model can call show_quote_rates immediately.
+    const preventFollowUp = !detailsChanged;
+
     return {
       userFacing,
       // NitroChat renders this under the card, after the widget.
-      renewalInvitation: "If they do, type **yes** and we'll go to checkout.",
-      preventFollowUp: true,
+      renewalInvitation: detailsChanged
+        ? `Those details changed, ${firstName}. Pick a carrier below to continue to checkout.`
+        : "If they do, type **yes** and we'll go to checkout.",
+      preventFollowUp,
       internal: {
         stage: 'awaiting_property_confirmation',
         awaitingPropertyConfirmation: true,
         authenticated: true,
-        preventFollowUp: true,
+        preventFollowUp,
         presentation: 'renewal',
-        nextTool: 'hq_stripe_create_payment_link',
-        nextToolArgs: { ticketId },
+        nextTool: detailsChanged ? 'show_quote_rates' : 'hq_stripe_create_payment_link',
+        nextToolArgs: detailsChanged
+          ? { quoteId: 1, formattedAddress, ticketId }
+          : { ticketId },
         ticketId,
         policyNumber: context.policyNumber,
         carrier: context.carrier,

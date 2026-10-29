@@ -139,21 +139,25 @@ export class DemoTools {
   @Tool({
     name: "show_quote_rates",
     description:
-      "Open the rates widget (only tool that mounts it). Call when internal.nextTool is show_quote_rates. If needsPropertyDetails was false after fetch_quote, call immediately after fetch_quote. If true, call only after recalculate_quote succeeded — never before.",
+      "Open the rates widget (only tool that mounts it). Call when internal.nextTool is show_quote_rates. If needsPropertyDetails was false after fetch_quote, call immediately after fetch_quote. If true, call only after recalculate_quote succeeded — never before. Also call once after a renewal property update when nextTool is show_quote_rates; pass nextToolArgs including ticketId.",
     inputSchema: z.object({
       quoteId: z.number(),
       formattedAddress: z.string(),
+      ticketId: z.string().optional().describe('Verified renewal ticket, when this follows a property update'),
     }),
   })
   @Widget(QUOTES_WIDGET)
-  async showQuoteRates(input: { quoteId: number; formattedAddress: string }) {
+  async showQuoteRates(input: { quoteId: number; formattedAddress: string; ticketId?: string }) {
     return {
       userFacing: {
         summary: `Your rates for ${input.formattedAddress} are ready below.`,
         formattedAddress: input.formattedAddress,
       },
+      preventFollowUp: true,
       internal: {
         quoteId: input.quoteId,
+        ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+        preventFollowUp: true,
         ...buildWidgetInternalFields(input.quoteId),
       },
     };

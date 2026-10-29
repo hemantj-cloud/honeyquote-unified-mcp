@@ -267,11 +267,67 @@ async function seed() {
     createdAt: new Date().toISOString(),
   };
 
+  const navaTicket = {
+    ticketId: 'HQ-DEMO-005',
+    subject: 'New business binding — signature outstanding',
+    status: 'new',
+    customerName: 'Nava',
+    policyNumber: 'HQ-POL-88425',
+    carrier: 'Citizens',
+    billedToMortgage: true,
+    recipientEmail: 'cnavarathinam@gmail.com',
+    customerEmail: 'cnavarathinam@gmail.com',
+    customerPhone: '+918939138620',
+    mortgageeEmail: 'escrow@examplemortgage.com',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    propertyAddress: '4100 Alton Rd, Miami Beach, FL 33140',
+    propertyAttributes: {
+      address: '4100 Alton Rd, Miami Beach, FL 33140',
+      yearBuilt: 2008,
+      squareFootage: 1680,
+      constructionType: 'Concrete Block / Stucco',
+      roofType: 'Concrete Tile',
+      roofGeometry: 'Hip Roof',
+      roofYear: 2017,
+      stories: 2,
+      primaryUse: 'Single Family Residence (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    effectiveDate: '2025-10-28',
+    renewalDate: '2026-11-28',
+    daysUntilExpiry: 31,
+    isRenewalEligible: true,
+    policyStatus: 'active',
+    paymentStatus: 'UNPAID',
+    coverages: {
+      dwelling: 385000,
+      personalProperty: 192500,
+      lossOfUse: 77000,
+      liability: 300000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    renewalPremium: 1875,
+    conversations: [],
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
   await db.collection('tickets').createIndex({ ticketId: 1 }, { unique: true });
   await db.collection('tickets').createIndex({ customerPhone: 1 });
   await db.collection('tickets').createIndex({ recipientEmail: 1 });
 
-  const seedTickets = [demoTicket, omniTicket, navarathinamTicket, hemantTicket, arpanTicket];
+  const seedTickets = [demoTicket, omniTicket, navarathinamTicket, hemantTicket, arpanTicket, navaTicket];
 
   for (const t of seedTickets) {
     await db.collection('tickets').replaceOne({ ticketId: t.ticketId }, t, { upsert: true });
