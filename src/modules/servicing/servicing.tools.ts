@@ -180,8 +180,9 @@ export class ServicingTools {
       this.authService.consumePolicyIntroduction(ticketId, sessionKey) ? 'Thank you, your identity is verified. ' : ''
     }Here are your policy details and coverage limits for your home. You can review everything in the card below.`;
 
-    // A renewed term that still needs a signature asks under the card. That yes
-    // generates a signing link; it is not consent to start another renewal.
+    // A paid term that still needs a signature shows e-sign, not another renewal.
+    // Sign Now on the card opens DocuSign; a yes in chat generates the link.
+    const paid = this.servicingService.isPolicyPaid(context);
     const signingInvitation = this.servicingService.getSigningConsentInvitation(context);
     const underCard = signingInvitation || renewal.renewalInvitation;
 
@@ -192,8 +193,10 @@ export class ServicingTools {
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
-        presentation: 'renewal',
-        paid: context.status === 'IN_FORCE_RENEWED' || context.paymentStatus === 'PAID',
+        presentation: signingInvitation ? 'servicing' : 'renewal',
+        paid,
+        paymentStatus: context.paymentStatus,
+        hasNotification: Boolean(signingInvitation),
         authenticated: true,
         preventFollowUp: true,
         awaitingRenewalConsent: signingInvitation ? false : renewal.isRenewalEligible,
@@ -213,6 +216,11 @@ export class ServicingTools {
         signatureRequired: context.signatureRequired,
         signatureStatus: context.signatureStatus,
         esignSent: context.esignSent,
+        missingDocuments: context.missingDocuments || [],
+        uploadedDocuments: context.uploadedDocuments || [],
+        documentStatus: context.documentStatus || (context.missingDocuments?.length ? 'OPEN' : 'COMPLETE'),
+        documentUploadUrl: documentUploadUrl(),
+        billedToMortgage: context.billedToMortgage,
         propertyAddress: context.propertyAddress,
         userId: context.userId || '6ad9bd5dcfc164fb5ece28e1',
         insuredEmail: context.recipientEmail,
@@ -236,6 +244,8 @@ export class ServicingTools {
     const context = await this.servicingService.getTicketContext(ticketId);
     const taskSummary = this.servicingService.formatPendingTasks(context);
     const renewal = this.servicingService.getRenewalInvitation(context);
+    const signingInvitation = this.servicingService.getSigningConsentInvitation(context);
+    const underCard = signingInvitation || renewal.renewalInvitation;
 
     await this.servicingService.appendConversationTurn(
       ticketId,
@@ -245,16 +255,19 @@ export class ServicingTools {
 
     return {
       userFacing: taskSummary,
-      ...(renewal.renewalInvitation ? { renewalInvitation: renewal.renewalInvitation } : {}),
+      ...(underCard ? { renewalInvitation: underCard } : {}),
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
       internal: {
         authenticated: true,
         preventFollowUp: true,
-        awaitingRenewalConsent: renewal.isRenewalEligible,
+        awaitingRenewalConsent: signingInvitation ? false : renewal.isRenewalEligible,
+        awaitingSignatureConsent: Boolean(signingInvitation),
+        ...(signingInvitation ? { nextTool: 'hq_docusign_send', hasNotification: true } : {}),
         customerName: context.customerName,
         presentation: 'servicing',
-        paid: context.status === 'IN_FORCE_RENEWED',
+        paid: this.servicingService.isPolicyPaid(context),
+        paymentStatus: context.paymentStatus,
         isRenewalEligible: renewal.isRenewalEligible,
         ticketId,
         policyNumber: context.policyNumber,
@@ -268,6 +281,7 @@ export class ServicingTools {
         signatureRequired: context.signatureRequired,
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
+        billedToMortgage: context.billedToMortgage,
         missingDocuments: context.missingDocuments,
         uploadedDocuments: context.uploadedDocuments || [],
         documentStatus: context.documentStatus || (context.missingDocuments?.length ? 'OPEN' : 'COMPLETE'),
@@ -281,7 +295,7 @@ export class ServicingTools {
   @Tool({
     name: 'get_renewal_property_details',
     description:
-      'Shows the on-record home details in the policy card for an authenticated renewal. Requires verified session. Call once for typed renewal intent; the Renew Policy widget already invokes it directly. Relay userFacing only — the card lists the details. When the customer then confirms, call hq_stripe_create_payment_link with ticketId only.',
+      'Shows the on-record home details in the policy card for an authenticated renewal that is not yet paid. Requires verified session. Do not call it when payment is already complete — that path shows Sign Now instead. Call once for typed renewal intent; the Renew Policy widget already invokes it directly. Relay userFacing only — the card lists the details. When the customer then confirms, call hq_stripe_create_payment_link with ticketId only.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Verified session ticket ID (e.g. HQ-DEMO-001)'),
     }),
@@ -290,6 +304,11 @@ export class ServicingTools {
   async getRenewalPropertyDetails(_input: { ticketId?: string }, ctx: ExecutionContext) {
     const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
     if (!ticketId) return unauthenticatedResult();
+
+    const existing = await this.servicingService.getTicketContext(ticketId);
+    if (this.servicingService.isPolicyPaid(existing)) {
+      return this.policyDetailsResult(ticketId, sessionKeyOf(ctx));
+    }
 
     await this.servicingService.appendConversationTurn(
       ticketId,
@@ -332,6 +351,11 @@ export class ServicingTools {
   ) {
     const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
     if (!ticketId) return unauthenticatedResult();
+
+    const existing = await this.servicingService.getTicketContext(ticketId);
+    if (this.servicingService.isPolicyPaid(existing)) {
+      return this.policyDetailsResult(ticketId, sessionKeyOf(ctx));
+    }
 
     const updates = { ...(input.propertyAttributes ?? {}) };
     if (typeof updates.address === 'string') updates.address = updates.address.trim();
@@ -498,6 +522,8 @@ export class ServicingTools {
           presentation: 'signing',
           carrier: context.carrier,
           policyNumber: context.policyNumber,
+          effectiveDate: context.effectiveDate,
+          renewalDate: context.renewalDate,
           customerName: context.customerName,
           ticketId,
           signingStatusUrl: signingStatusUrl(),

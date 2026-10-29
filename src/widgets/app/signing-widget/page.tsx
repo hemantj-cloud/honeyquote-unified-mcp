@@ -38,6 +38,9 @@ export default function SigningWidget() {
   const alreadySigned = raw.signed === true || raw.signatureStatus === 'signed';
   const carrier = raw.carrier || 'Citizens Property Insurance';
   const policyNumber = raw.policyNumber || '';
+  const effectiveDate = String(raw.effectiveDate || '').slice(0, 10);
+  const renewalDate = String(raw.renewalDate || '').slice(0, 10);
+  const termLabel = effectiveDate && renewalDate ? `${effectiveDate} to ${renewalDate}` : '';
   const customerName = String(raw.customerName || '').trim();
   const ticketId = raw.ticketId || '';
   const workflowApiUrl = (() => {
@@ -215,6 +218,9 @@ export default function SigningWidget() {
               {policyNumber ? `Policy #${policyNumber}` : 'Renewal document'}
               {firstName ? ` • ${firstName}` : ''}
             </div>
+            {termLabel ? (
+              <div style={{ fontSize: '12px', color: '#64748B', marginTop: '2px' }}>Term {termLabel}</div>
+            ) : null}
           </div>
         </div>
 
@@ -262,7 +268,7 @@ export default function SigningWidget() {
               }}
             >
               <span style={{ fontSize: '18px' }}>✍️</span>
-              <span>Sign document</span>
+              <span>Sign Now</span>
               <span style={{ fontSize: '18px', marginLeft: '4px' }}>→</span>
             </button>
           )}
@@ -277,16 +283,7 @@ export default function SigningWidget() {
                 fontWeight: 600,
               }}
             >
-              DocuSign opened — this card updates after you sign.
-            </div>
-          )}
-
-          {signatureStatus === 'pending' && (
-            <div style={{ marginTop: '10px', textAlign: 'center', fontSize: '12px', color: '#64748B', lineHeight: 1.5 }}>
-              {popupBlocked ? 'Your browser blocked the signing tab. ' : 'Or '}
-              <a href={signingUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#177C56', fontWeight: 600 }}>
-                open the signing link
-              </a>
+              {popupBlocked ? 'Your browser blocked the signing tab. Tap Sign Now again.' : 'DocuSign opened — this card updates after you sign.'}
             </div>
           )}
         </div>

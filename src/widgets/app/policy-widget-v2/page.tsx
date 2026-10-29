@@ -128,6 +128,10 @@ export default function PolicyServicingWidget() {
     : 'Not available on record';
   const isStandalonePreview =
     typeof window !== 'undefined' && window.location.pathname.includes('policy-widget') && !rawInternal.renewalDate;
+  const isPaid =
+    rawInternal.paid === true ||
+    rawInternal.paymentStatus === 'PAID' ||
+    rawInternal.status === 'IN_FORCE_RENEWED';
   const liveRenewalDate = rawInternal.renewalDate as string | undefined;
   const liveEffectiveDate = rawInternal.effectiveDate as string | undefined;
   const resolvedRenewalDate = liveRenewalDate || (isStandalonePreview ? ymdUtcFromOffset(13) : undefined);
@@ -166,6 +170,7 @@ export default function PolicyServicingWidget() {
     renewalDate: resolvedRenewalDate,
     daysUntilExpiry: daysFromDate ?? undefined,
     isRenewalEligible:
+      !isPaid &&
       typeof daysFromDate === 'number' &&
       daysFromDate > 0 &&
       daysFromDate <= 30 &&
@@ -196,7 +201,7 @@ export default function PolicyServicingWidget() {
   const isSignedComplete = rawInternal.presentation === 'signed';
 
   const [activeTab, setActiveTab] = useState<'coverages' | 'checklist'>(
-    isSignedComplete ? 'coverages' : (hasServicingNotification || isTasksTool) ? 'checklist' : 'coverages'
+    isSignedComplete ? 'coverages' : (isPaid || hasServicingNotification || isTasksTool) ? 'checklist' : 'coverages'
   );
 
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -204,14 +209,16 @@ export default function PolicyServicingWidget() {
   const daysRemaining = daysFromDate;
 
   const isRenewalWindow = Boolean(
-    typeof daysRemaining === 'number' &&
+    !isPaid &&
+      typeof daysRemaining === 'number' &&
       daysRemaining > 0 &&
       daysRemaining <= 30 &&
       resolvedData.status !== 'IN_FORCE_RENEWED'
   );
-  const isRenewed = resolvedData.status === 'IN_FORCE_RENEWED';
-  const canManageSignature = !isUnauthenticated && !isRenewalWindow && (
-    (isRenewed && rawInternal.paid === true) ||
+  const isRenewed = resolvedData.status === 'IN_FORCE_RENEWED' || isPaid;
+  const needsSignature = rawInternal.signatureStatus !== 'signed' && (Boolean(rawInternal.signatureRequired) || isPaid);
+  const canManageSignature = !isUnauthenticated && !isPropertyConfirmation && !isRenewalWindow && (
+    isPaid ||
     rawInternal.presentation === 'servicing' ||
     rawInternal.presentation === 'signed' ||
     (!rawInternal.presentation && hasServicingNotification && !isRenewed)
@@ -221,8 +228,9 @@ export default function PolicyServicingWidget() {
   // entirely (Ankita: warning lives on the term dates only), so never leave the
   // user stranded on a tab that isn't rendered.
   useEffect(() => {
-    if (isRenewalWindow || isSignedComplete) setActiveTab('coverages');
-  }, [isRenewalWindow, isSignedComplete]);
+    if (isSignedComplete || isRenewalWindow) setActiveTab('coverages');
+    else if (isPaid && needsSignature) setActiveTab('checklist');
+  }, [isRenewalWindow, isSignedComplete, isPaid, needsSignature]);
 
   // Dynamic interactive states for servicing checklist & actions
   const [missingDocs, setMissingDocs] = useState<string[]>(
@@ -240,10 +248,11 @@ export default function PolicyServicingWidget() {
     setUploadedDocs(Array.isArray(rawInternal.uploadedDocuments) ? rawInternal.uploadedDocuments : []);
   }, [resolvedData.ticketId, serverMissingKey, serverUploadedKey]);
   const [signatureNeeded, setSignatureNeeded] = useState<boolean>(
-    Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed')
+    Boolean(rawInternal.signatureStatus !== 'signed' && (resolvedData.signatureRequired || isPaid))
   );
   const [, setIsEsignSent] = useState<boolean>(Boolean(resolvedData.esignSent));
-  const isPaidViaStripe = rawInternal.paid === true || resolvedData.status === 'IN_FORCE_RENEWED';
+  const isPaidViaStripe = isPaid;
+  const showRenewedEsign = isPaid && signatureNeeded && !isPropertyConfirmation;
 
   const [signatureSigned, setSignatureSigned] = useState(rawInternal.signatureStatus === 'signed');
   const [awaitingSignature, setAwaitingSignature] = useState(false);
@@ -263,8 +272,8 @@ export default function PolicyServicingWidget() {
   };
   useEffect(() => {
     setSignatureSigned(rawInternal.signatureStatus === 'signed');
-    setSignatureNeeded(Boolean(resolvedData.signatureRequired && rawInternal.signatureStatus !== 'signed'));
-  }, [resolvedData.ticketId, resolvedData.signatureRequired, rawInternal.signatureStatus]);
+    setSignatureNeeded(Boolean(rawInternal.signatureStatus !== 'signed' && (resolvedData.signatureRequired || isPaid)));
+  }, [resolvedData.ticketId, resolvedData.signatureRequired, rawInternal.signatureStatus, isPaid]);
   const workflowApiUrl = (() => {
     const candidate = sdkOutput?.workflowApiUrl || sdkOutput?.internal?.workflowApiUrl;
     if (typeof candidate === 'string' && candidate.startsWith('http')) {
@@ -1182,13 +1191,32 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                   {signatureNeeded ? '✍️' : '✅'}
                 </span>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>DocuSign Electronic Signature</span>
+                    {showRenewedEsign && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          color: '#8A4A00',
+                          background: '#FFFFFF',
+                          border: `1px solid ${colors.warningBorder}`,
+                          borderRadius: '100px',
+                          padding: '2px 8px',
+                        }}
+                      >
+                        Optional
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
-                    {signatureNeeded
-                      ? 'Your renewal document needs your electronic signature'
-                      : signatureSigned ? 'Your renewal document has been electronically signed' : 'No signature currently required'}
+                    {showRenewedEsign
+                      ? 'Optional: Application requires electronic signature if requesting policy modifications'
+                      : signatureNeeded
+                        ? 'Your renewal document needs your electronic signature'
+                        : signatureSigned ? 'Your renewal document has been electronically signed' : 'No signature currently required'}
                   </div>
                 </div>
               </div>
@@ -1255,7 +1283,9 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                   <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Supporting Documents</div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
                     {missingDocs.length > 0
-                      ? `Open until uploaded. Missing: ${missingDocs.map(formatDocumentLabel).join(', ')}`
+                      ? showRenewedEsign
+                        ? `Missing: ${missingDocs.join(', ')}`
+                        : `Open until uploaded. Missing: ${missingDocs.map(formatDocumentLabel).join(', ')}`
                       : 'All required documents are on file'}
                   </div>
                   {uploadedDocs.length > 0 && (
@@ -1304,7 +1334,46 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               )}
             </div>
 
-            {/* Renewal Payment Status */}
+            {showRenewedEsign && resolvedData.billedToMortgage ? (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '14px 16px',
+                borderRadius: '12px',
+                background: colors.successBg,
+                border: `1px solid ${colors.successBorder}`,
+                gap: '12px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ fontSize: '20px' }}>🏦</span>
+                <div>
+                  <div style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>Mortgage Escrow Verification</div>
+                  <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
+                    Carrier has invoiced your mortgage escrow account directly
+                  </div>
+                </div>
+              </div>
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: '#1B493D',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  padding: '3px 10px',
+                  borderRadius: '100px',
+                  background: '#FFFFFF',
+                  border: '1px solid #B8E2CB',
+                }}
+              >
+                Verified
+              </span>
+            </div>
+            ) : (
+            /* Renewal Payment Status */
             <div
               style={{
                 display: 'flex',
@@ -1344,6 +1413,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 {isPaidViaStripe ? 'Paid' : 'Due'}
               </span>
             </div>
+            )}
           </div>
         </div>
       )}

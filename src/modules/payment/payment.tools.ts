@@ -67,6 +67,29 @@ export class PaymentTools {
       policyNumber: undefined,
       customerEmail: undefined,
     });
+
+    if (result.alreadyPaid) {
+      const firstName = String(result.customerName || '').split(' ')[0] || 'there';
+      return {
+        userFacing: result.signed
+          ? 'Your renewal payment is already complete, and the renewal document is signed. You can review your policy in the card from earlier in this chat.'
+          : `Hey ${firstName}, your renewal payment is already complete. Your documents still need to be signed. Reply **yes** and I'll generate a link to sign.`,
+        preventFollowUp: true,
+        internal: {
+          authenticated: false,
+          alreadyPaid: true,
+          paid: true,
+          preventFollowUp: true,
+          awaitingRenewalConsent: false,
+          awaitingSignatureConsent: !result.signed,
+          ...(result.signed ? {} : { nextTool: 'hq_docusign_send' }),
+          ticketId,
+          carrier: result.carrier,
+          policyNumber: result.policyNumber,
+        },
+      };
+    }
+
     const formattedPremium = `$${result.premiumAmount.toLocaleString('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -122,18 +145,28 @@ export class PaymentTools {
     const firstName = String(context.customerName || '').split(' ')[0] || 'there';
     const isSigned = context.signatureStatus === 'signed';
 
+    const carrierName = context.carrier || 'Citizens';
+    const paymentConfirmation = `Payment received — your policy renewal with ${carrierName} is confirmed and **in force**.`;
+
     return {
-      userFacing:
-        `Payment received — your policy renewal with ${context.carrier || 'Citizens'} is confirmed and **in force**.\n\n` +
-        (isSigned
-          ? 'Your renewal document is already signed. You can review your renewed policy in the card below.'
-          : `Hey ${firstName}, please sign the renewal document — tap **Sign Now** in the card below.`),
+      userFacing: isSigned
+        ? `${paymentConfirmation}\n\nYour renewal document is already signed. You can review your renewed policy in the card below.`
+        : paymentConfirmation,
+      ...(isSigned
+        ? {}
+        : {
+            renewalInvitation: `Hey ${firstName}, please sign the renewal document — tap **Sign Now** or say **yes**, and I'll guide you through the e-sign process.`,
+          }),
       preventFollowUp: true,
       internal: {
         authenticated: true,
-        hasNotification: true,
-        presentation: 'renewal',
+        presentation: isSigned ? 'signed' : 'servicing',
+        hasNotification: !isSigned,
+        awaitingRenewalConsent: false,
+        awaitingSignatureConsent: !isSigned,
+        ...(isSigned ? {} : { nextTool: 'hq_docusign_send' }),
         paid: true,
+        paymentStatus: 'PAID',
         status: 'IN_FORCE_RENEWED',
         ticketId,
         policyNumber: context.policyNumber,
@@ -146,6 +179,7 @@ export class PaymentTools {
         esignSent: context.esignSent,
         signatureStatus: context.signatureStatus,
         missingDocuments: context.missingDocuments,
+        billedToMortgage: context.billedToMortgage,
         uploadedDocuments: context.uploadedDocuments || [],
         documentStatus: context.documentStatus || (context.missingDocuments?.length ? 'OPEN' : 'COMPLETE'),
         documentUploadUrl: `${resolveSigningPublicUrl()}/api/policy/document/upload`,

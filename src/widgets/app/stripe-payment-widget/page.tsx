@@ -85,8 +85,19 @@ export default function StripePayButtonWidget() {
     isCancelledReturn
   );
 
-  // Check if session or ticket was already marked paid in SDK data, widgetState, or localStorage
+  const awaitingCheckout = rawData.paymentStatus === 'AWAITING_CHECKOUT';
+
+  // A new checkout stays on the Pay button until THIS session is paid.
+  // A previous payment for the same ticket, or an older widget state, does not count.
   const getInitialPaid = (): boolean => {
+    if (awaitingCheckout) {
+      if (typeof window !== 'undefined' && checkoutSessionId) {
+        try {
+          if (localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true') return true;
+        } catch {}
+      }
+      return false;
+    }
     if (
       rawData.paymentStatus === 'PAID' ||
       rawData.paymentStatus === 'paid' ||
@@ -96,17 +107,6 @@ export default function StripePayButtonWidget() {
       urlParams?.get('renewed') === 'true'
     ) {
       return true;
-    }
-    // If explicitly awaiting checkout, do NOT use stale ticket localStorage from past runs
-    if (rawData.paymentStatus === 'AWAITING_CHECKOUT') {
-      if (typeof window !== 'undefined') {
-        try {
-          if (checkoutSessionId && localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true') {
-            return true;
-          }
-        } catch {}
-      }
-      return false;
     }
     if (typeof window !== 'undefined') {
       const widgetState = (window as any).openai?.widgetState;
@@ -195,11 +195,16 @@ export default function StripePayButtonWidget() {
         return;
       }
       try {
-        // Check localStorage fast path first
+        // Only this checkout session. A previous hq_paid_ticket_* flag is a different payment.
         if (typeof window !== 'undefined') {
           try {
-            if (localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true' ||
-                (ticketId && localStorage.getItem(`hq_paid_ticket_${ticketId}`) === 'true')) {
+            const thisSessionPaid =
+              localStorage.getItem(`hq_paid_session_${checkoutSessionId}`) === 'true';
+            const previousTicketPaid =
+              !awaitingCheckout &&
+              Boolean(ticketId) &&
+              localStorage.getItem(`hq_paid_ticket_${ticketId}`) === 'true';
+            if (thisSessionPaid || previousTicketPaid) {
               setPaymentStatus('paid');
               if (pollRef.current) clearInterval(pollRef.current);
               return;
@@ -241,11 +246,14 @@ export default function StripePayButtonWidget() {
           console.warn('[stripe-widget] Silent status poll fetch error:', fetchErr);
         }
 
+        const reportedSession = data?.checkoutSessionId || data?.internal?.checkoutSessionId;
+        const sessionMatches = !reportedSession || reportedSession === checkoutSessionId;
         const isPaid =
-          data?.status === 'paid' ||
-          data?.internal?.paid === true ||
-          data?.internal?.status === 'IN_FORCE_RENEWED' ||
-          data?.paid === true;
+          sessionMatches &&
+          (data?.status === 'paid' ||
+            data?.internal?.paid === true ||
+            data?.internal?.status === 'IN_FORCE_RENEWED' ||
+            data?.paid === true);
 
         if (isPaid) {
           setPaymentStatus('paid');
@@ -297,7 +305,7 @@ export default function StripePayButtonWidget() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [checkoutSessionId, paymentStatus, ticketId, workflowApiUrl]);
+  }, [awaitingCheckout, checkoutSessionId, paymentStatus, ticketId, workflowApiUrl]);
 
   // Report the card's height to the NitroChat iframe whenever its content resizes, so the
   // frame never keeps a stale (taller) height after data, fonts, or state changes land.

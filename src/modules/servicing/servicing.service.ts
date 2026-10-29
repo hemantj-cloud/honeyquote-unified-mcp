@@ -57,11 +57,12 @@ export class ServicingService {
       expiry.toISOString().slice(0, 10) === date;
     const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
     const daysUntilExpiry = validDate ? Math.round((expiry.getTime() - today) / 86400000) : 14;
+    // Payment already collected means the term is bound. Do not offer another renewal.
     const isRenewalEligible =
+      !this.isPolicyPaid(ctx) &&
       daysUntilExpiry !== undefined &&
       daysUntilExpiry > 0 &&
-      daysUntilExpiry <= 30 &&
-      ctx.status !== 'IN_FORCE_RENEWED';
+      daysUntilExpiry <= 30;
     const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'Jordan';
     const greeting = firstName ? `Hey ${firstName}` : 'Hi';
     const renewalInvitation = isRenewalEligible
@@ -73,17 +74,20 @@ export class ServicingService {
     return { daysUntilExpiry, isRenewalEligible, renewalInvitation };
   }
 
+  /** Renewal premium is already collected, so the next step is e-sign, not another renewal. */
+  isPolicyPaid(ctx: { status?: string; paymentStatus?: string }): boolean {
+    return ctx.status === 'IN_FORCE_RENEWED' || ctx.paymentStatus === 'PAID';
+  }
+
   /**
-   * Under-card prompt after a renewed customer verifies again and the new term
+   * Under-card prompt after a paid customer verifies again and the new term
    * still needs a signature. Sign Now on the card opens DocuSign; a yes in chat
    * generates the link and shows the signing widget.
    */
   getSigningConsentInvitation(ctx: HqTicketContext): string | undefined {
-    const renewed = ctx.status === 'IN_FORCE_RENEWED' || ctx.paymentStatus === 'PAID';
-    const needsSignature = Boolean(ctx.signatureRequired) && ctx.signatureStatus !== 'signed';
-    if (!renewed || !needsSignature) return undefined;
+    if (!this.isPolicyPaid(ctx) || ctx.signatureStatus === 'signed') return undefined;
     const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
-    return `Hey ${firstName}, your documents need to be signed. Do you want to proceed? Please click **Sign Now** in the card, or reply **yes** and I'll generate a link to sign.`;
+    return `Hey ${firstName}, please sign the renewal document — tap **Sign Now** or say **yes**, and I'll guide you through the e-sign process.`;
   }
 
   formatPolicySummary(ctx: HqTicketContext): string {

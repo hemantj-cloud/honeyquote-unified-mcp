@@ -28,6 +28,9 @@ export class PaymentService {
 
   async createPaymentLink(input: CreatePaymentLinkInput): Promise<{
     ok: boolean;
+    alreadyPaid?: boolean;
+    signed?: boolean;
+    customerName?: string;
     checkoutUrl: string;
     checkoutSessionId: string;
     clientSecret?: string;
@@ -40,6 +43,23 @@ export class PaymentService {
   }> {
     const ticketId = input.ticketId || 'HQ-DEMO-002';
     const ticket = await this.ticketRepo.getTicketContext(ticketId);
+
+    if (ticket.status === 'IN_FORCE_RENEWED' || ticket.paymentStatus === 'PAID') {
+      return {
+        ok: false,
+        alreadyPaid: true,
+        signed: ticket.signatureStatus === 'signed',
+        customerName: ticket.customerName,
+        carrier: toCarrierDisplayName(ticket.carrier),
+        premiumAmount: ticket.renewalPremium || DEFAULT_RENEWAL_PREMIUM,
+        policyNumber: ticket.policyNumber || '',
+        customerEmail: ticket.recipientEmail || '',
+        ticketId,
+        checkoutUrl: '',
+        checkoutSessionId: ticket.checkoutSessionId || '',
+        receiptId: ticket.receiptId || '',
+      };
+    }
 
     // A same-carrier renewal passes no carrier/premium: price it from the ticket on record.
     const carrier = toCarrierDisplayName(input.carrier || ticket.carrier);
@@ -168,9 +188,10 @@ export class PaymentService {
       };
     }
 
-    // 2. Check Stripe Checkout Session if provided
+    // 2. A new or mock session stays pending until Stripe reports this session paid.
     let isPaid = false;
-    if (input.checkoutSessionId && !input.checkoutSessionId.includes('mock') && stripeKey) {
+    const mockSession = input.checkoutSessionId.includes('mock');
+    if (!mockSession && stripeKey) {
       try {
         const res = await fetch(`https://api.stripe.com/v1/checkout/sessions/${input.checkoutSessionId}`, {
           headers: { Authorization: `Bearer ${stripeKey}` },
@@ -184,9 +205,6 @@ export class PaymentService {
         console.warn(`[payment] Stripe session check failed: ${err.message}`);
         isPaid = false;
       }
-    } else if (input.checkoutSessionId && input.checkoutSessionId.includes('mock')) {
-      // In mock testing mode without Stripe key, treat as paid
-      isPaid = true;
     }
 
     let context: any = ticket || {};
