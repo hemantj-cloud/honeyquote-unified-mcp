@@ -6,6 +6,7 @@ import {
 } from '@nitrostack/core';
 import { PaymentService } from './payment.service.js';
 import { ServicingAuthService } from '../servicing/servicing.auth.service.js';
+import { ServicingService } from '../servicing/servicing.service.js';
 import { unauthenticatedResult } from '../servicing/servicing.types.js';
 import { sessionKeyOf } from '../servicing/session-key.js';
 import {
@@ -43,11 +44,12 @@ const POLICY_WIDGET = {
   },
 };
 
-@Injectable({ deps: [PaymentService, ServicingAuthService] })
+@Injectable({ deps: [PaymentService, ServicingAuthService, ServicingService] })
 export class PaymentTools {
   constructor(
     private readonly paymentService: PaymentService,
-    private readonly authService: ServicingAuthService
+    private readonly authService: ServicingAuthService,
+    private readonly servicingService: ServicingService
   ) {}
 
   @Tool({
@@ -58,7 +60,7 @@ export class PaymentTools {
   })
   @Widget(STRIPE_PAYMENT_WIDGET)
   async createPaymentLink(input: CreatePaymentLinkInput, ctx: ExecutionContext) {
-    const ticketId = this.authService.getVerifiedTicketId(sessionKeyOf(ctx));
+    const ticketId = this.authService.resolveVerifiedTicket(sessionKeyOf(ctx), input.ticketId);
     if (!ticketId) return unauthenticatedResult();
 
     const result = await this.paymentService.createPaymentLink({
@@ -69,11 +71,17 @@ export class PaymentTools {
     });
 
     if (result.alreadyPaid) {
-      const firstName = String(result.customerName || '').split(' ')[0] || 'there';
+      const firstName = String(result.customerName || '').trim().split(/\s+/)[0] || 'there';
+      const signingInvitation = this.servicingService.getSigningConsentInvitation({
+        status: 'IN_FORCE_RENEWED',
+        paymentStatus: 'PAID',
+        signatureStatus: result.signed ? 'signed' : 'pending',
+        customerName: result.customerName,
+      });
       return {
         userFacing: result.signed
-          ? 'Your renewal payment is already complete, and the renewal document is signed. You can review your policy in the card from earlier in this chat.'
-          : `Hey ${firstName}, your renewal payment is already complete. Your documents still need to be signed. Reply **yes** and I'll generate a link to sign.`,
+          ? `Great news, ${firstName} — your ${result.carrier} policy is renewed. And the document is signed.`
+          : signingInvitation || `One last step, ${firstName}. Type **yes** or tap **Sign Now** and I'll open the document.`,
         preventFollowUp: true,
         internal: {
           authenticated: false,
@@ -94,9 +102,10 @@ export class PaymentTools {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
+    const firstName = String(result.customerName || '').trim().split(/\s+/)[0] || 'there';
 
     return {
-      userFacing: `Your policy renewal with **${result.carrier}** is ready at **${formattedPremium}/year** (Policy #${result.policyNumber}).\n\nPlease use the checkout widget below to securely complete your payment with Stripe and bind your renewal term:`,
+      userFacing: `${firstName}, your renewal with **${result.carrier}** is **${formattedPremium}/year**. The checkout card is just below.`,
       preventFollowUp: true,
       internal: {
         preventFollowUp: true,
@@ -142,21 +151,23 @@ export class PaymentTools {
     }
 
     const context: any = result.context || {};
-    const firstName = String(context.customerName || '').split(' ')[0] || 'there';
     const isSigned = context.signatureStatus === 'signed';
+    const signingInvitation = this.servicingService.getSigningConsentInvitation({
+      status: context.status || 'IN_FORCE_RENEWED',
+      paymentStatus: context.paymentStatus || 'PAID',
+      signatureStatus: context.signatureStatus,
+      customerName: context.customerName,
+    });
 
     const carrierName = context.carrier || 'Citizens';
-    const paymentConfirmation = `Payment received — your policy renewal with ${carrierName} is confirmed and **in force**.`;
+    const firstName = String(context.customerName || '').trim().split(/\s+/)[0] || 'there';
+    const paymentConfirmation = `Great news, ${firstName} — your ${carrierName} policy is renewed.`;
 
     return {
       userFacing: isSigned
-        ? `${paymentConfirmation}\n\nYour renewal document is already signed. You can review your renewed policy in the card below.`
+        ? `${paymentConfirmation} And the document is signed.`
         : paymentConfirmation,
-      ...(isSigned
-        ? {}
-        : {
-            renewalInvitation: `Hey ${firstName}, please sign the renewal document — tap **Sign Now** or say **yes**, and I'll guide you through the e-sign process.`,
-          }),
+      ...(isSigned || !signingInvitation ? {} : { renewalInvitation: signingInvitation }),
       preventFollowUp: true,
       internal: {
         authenticated: true,

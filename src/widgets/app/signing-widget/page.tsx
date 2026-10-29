@@ -94,29 +94,37 @@ export default function SigningWidget() {
   }, [authenticated, signingUrl, signatureStatus, opened, popupBlocked]);
 
   useEffect(() => {
-    if (!authenticated || !signingUrl || !ticketId || signatureStatus === 'signed') return;
+    if (!authenticated || !signingUrl || !ticketId || announcedRef.current) return;
     let active = true;
-    let attempts = 0;
+    let announcing = false;
+    const startedAt = Date.now();
+    const MAX_POLL_MS = 30 * 60 * 1000;
 
     const refresh = async () => {
       try {
         const resp = await fetch(`${signingStatusUrl}?ticketId=${encodeURIComponent(ticketId)}`);
-        if (!resp.ok) return;
+        if (!resp.ok || !active) return;
         const result = await resp.json();
-        if (!active || !result?.signed) return;
+        if (!result?.signed) return;
         setSignatureStatus('signed');
-        if (announcedRef.current) return;
-        announcedRef.current = true;
+        if (announcedRef.current || announcing) return;
         const sdk = (window as any).openai;
-        if (typeof sdk?.callTool === 'function') {
-          void sdk.callTool('hq_docusign_status', { ticketId }).catch(() => {});
+        if (typeof sdk?.callTool !== 'function') return;
+        announcing = true;
+        try {
+          await sdk.callTool('hq_docusign_status', { ticketId });
+          announcedRef.current = true;
+        } catch {
+          // Leave announcedRef false so the next poll tries again.
+        } finally {
+          announcing = false;
         }
       } catch {}
     };
 
     void refresh();
     const timer = setInterval(() => {
-      if (++attempts >= 60) {
+      if (Date.now() - startedAt >= MAX_POLL_MS || announcedRef.current) {
         clearInterval(timer);
         return;
       }
@@ -131,7 +139,7 @@ export default function SigningWidget() {
       clearInterval(timer);
       window.removeEventListener('focus', onFocus);
     };
-  }, [authenticated, signingUrl, ticketId, signingStatusUrl, signatureStatus]);
+  }, [authenticated, signingUrl, ticketId, signingStatusUrl]);
 
   const openSigning = () => {
     if (!signingUrl || signatureStatus === 'signed') return;

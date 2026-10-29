@@ -154,6 +154,7 @@ export class PaymentService {
       policyNumber,
       customerEmail: email,
       ticketId,
+      customerName: ticket.customerName,
     };
   }
 

@@ -83,27 +83,14 @@ export default function PolicyServicingWidget() {
     activeInternal.stage === 'awaiting_property_confirmation'
   );
 
-  // Report the card's height to the NitroChat iframe whenever its content resizes (data,
-  // tabs, notices, fonts), so the frame never keeps a stale, taller height.
-  // The renewal confirmation card is shorter (header + property details), so it reports
-  // its real height instead of the 370px floor used by the full policy card.
+  // Report the card's own height so the narrow chat column is not held open by a floor
+  // or by the host document's scroll height.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     let lastHeight = -1;
     const notifyHeight = () => {
-      const contentHeight = isPropertyConfirmation
-        ? el.scrollHeight
-        : Math.max(
-            el.scrollHeight,
-            document.documentElement?.scrollHeight || 0,
-            document.body?.scrollHeight || 0
-          );
-      const height = isUnauthenticated
-        ? 0
-        : isPropertyConfirmation
-          ? contentHeight + 16
-          : Math.max(contentHeight + 16, 370);
+      const height = isUnauthenticated ? 0 : el.scrollHeight + 16;
       if (height === lastHeight) return;
       lastHeight = height;
       window.parent.postMessage(
@@ -115,7 +102,7 @@ export default function PolicyServicingWidget() {
     const observer = new ResizeObserver(notifyHeight);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [isUnauthenticated, isPropertyConfirmation]);
+  }, [isUnauthenticated]);
 
   const propertyAttrs = activeInternal.propertyAttributes || {};
   const confirmationAddress = propertyAttrs.address || activeInternal.propertyAddress || activeInternal.address;
@@ -256,20 +243,29 @@ export default function PolicyServicingWidget() {
 
   const [signatureSigned, setSignatureSigned] = useState(rawInternal.signatureStatus === 'signed');
   const [awaitingSignature, setAwaitingSignature] = useState(false);
+  // A card that mounted already signed (the status tool's own result) must not announce again.
+  const announcedRef = useRef(
+    rawInternal.presentation === 'signed' || rawInternal.signatureStatus === 'signed'
+  );
+  const announceInFlight = useRef(false);
+  const announceSignedPolicy = async (ticketId: string) => {
+    if (!ticketId || announcedRef.current || announceInFlight.current) return;
+    const sdk = (window as any).openai;
+    if (typeof sdk?.callTool !== 'function') return;
+    announceInFlight.current = true;
+    try {
+      await sdk.callTool('hq_docusign_status', { ticketId });
+      announcedRef.current = true;
+    } catch {
+      // Leave announcedRef false so the next status poll tries again.
+    } finally {
+      announceInFlight.current = false;
+    }
+  };
   useEffect(() => {
     setAwaitingSignature(false);
     setActionNotice(null);
   }, [resolvedData.ticketId, rawInternal.presentation, rawInternal.paid]);
-  const callSigningTool = async (name: string, args: Record<string, unknown>) => {
-    const sdk = (window as any).openai;
-    if (typeof sdk?.callTool !== 'function') throw new Error('Signing unavailable in this client');
-    const response = await sdk.callTool(name, args);
-    let payload = response?.structuredContent || response;
-    if (response?.content?.[0]?.text) payload = JSON.parse(response.content[0].text);
-    const result = payload?.internal || payload;
-    if (response?.isError || result?.success === false || result?.ok === false) throw new Error('Signing request failed');
-    return result;
-  };
   useEffect(() => {
     setSignatureSigned(rawInternal.signatureStatus === 'signed');
     setSignatureNeeded(Boolean(rawInternal.signatureStatus !== 'signed' && (resolvedData.signatureRequired || isPaid)));
@@ -318,48 +314,46 @@ export default function PolicyServicingWidget() {
       return `${workflowApiUrl}/signing/status`;
     }
   })();
-  const announcedRef = useRef(false);
   useEffect(() => {
-    if (!canManageSignature || !signatureNeeded || !signingStatusUrl) return;
+    if (!canManageSignature || !signingStatusUrl || !resolvedData.ticketId) return;
+    if (announcedRef.current) return;
+    // Only the Sign Now click on this card starts the watch. A typed yes is announced
+    // by the signing widget, so this card does not post a second time.
+    if (!awaitingSignature && !signatureSigned) return;
     let active = true;
-    let attempts = 0;
-    // Plain fetch, not callTool: tool calls render in the chat, so polling through
-    // them would post a "still pending" message every few seconds.
+    const startedAt = Date.now();
+    const MAX_POLL_MS = 30 * 60 * 1000;
+    const ticketId = resolvedData.ticketId;
+    // Plain fetch while unsigned. The chat tool runs once, after DocuSign reports signed.
     const refresh = async () => {
       try {
-        const resp = await fetch(`${signingStatusUrl}?ticketId=${encodeURIComponent(resolvedData.ticketId || '')}`);
-        if (!resp.ok) return;
+        const resp = await fetch(`${signingStatusUrl}?ticketId=${encodeURIComponent(ticketId)}`);
+        if (!resp.ok || !active) return;
         const result = await resp.json();
-        if (active && result?.signed) {
-          setSignatureNeeded(false);
-          setSignatureSigned(true);
-          setAwaitingSignature(false);
-          setActionNotice(null);
-          // One chat-visible status call: success message plus the updated policy card.
-          if (!announcedRef.current) {
-            announcedRef.current = true;
-            void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {
-              setActionNotice('Your renewal document has been signed successfully.');
-            });
-          }
-        }
+        if (!result?.signed) return;
+        setSignatureNeeded(false);
+        setSignatureSigned(true);
+        setAwaitingSignature(false);
+        setActionNotice(null);
+        await announceSignedPolicy(ticketId);
       } catch {}
     };
     void refresh();
     const onFocus = () => { void refresh(); };
     window.addEventListener('focus', onFocus);
-    const timer = awaitingSignature ? setInterval(() => {
-      if (++attempts >= 60) { setAwaitingSignature(false); return; }
+    const timer = setInterval(() => {
+      if (Date.now() - startedAt >= MAX_POLL_MS || announcedRef.current) {
+        clearInterval(timer);
+        return;
+      }
       void refresh();
-    }, 5000) : undefined;
+    }, 5000);
     return () => { active = false; clearInterval(timer); window.removeEventListener('focus', onFocus); };
-  }, [resolvedData.ticketId, canManageSignature, signatureNeeded, awaitingSignature, signingStatusUrl]);
+  }, [resolvedData.ticketId, canManageSignature, signatureNeeded, awaitingSignature, signatureSigned, signingStatusUrl]);
 
   const [isSigning, setIsSigning] = useState<boolean>(false);
   const [isUploadingDocs, setIsUploadingDocs] = useState<boolean>(false);
   const [isGeneratingCOI, setIsGeneratingCOI] = useState<boolean>(false);
-  const [isSubmittingEndorsement, setIsSubmittingEndorsement] = useState<boolean>(false);
-  const [endorsementPending, setEndorsementPending] = useState<boolean>(false);
   const [isRenewing, setIsRenewing] = useState<boolean>(false);
   const [renewalTriggered, setRenewalTriggered] = useState<boolean>(false);
 
@@ -399,43 +393,48 @@ export default function PolicyServicingWidget() {
     if (isRenewing || renewalTriggered) return;
     setIsRenewing(true);
     setRenewalTriggered(true);
-    setActionNotice('Initiating policy renewal and preparing on-record verification...');
+    setActionNotice(null);
 
-    try {
+    const renewOnce = async () => {
       const openaiSdk = (window as any).openai;
       if (typeof openaiSdk?.callTool === 'function') {
-        const response = await openaiSdk.callTool('get_renewal_property_details', {
+        await openaiSdk.callTool('get_renewal_property_details', {
           ticketId: resolvedData.ticketId,
         });
-        let payload = response?.structuredContent || response;
-        if (!response?.structuredContent && response?.content?.[0]?.text) {
-          try {
-            payload = JSON.parse(response.content[0].text);
-          } catch {}
-        }
-        setActionNotice('Property details retrieved for your review.');
-      } else {
-        // Fallback via MCP HTTP call if running outside NitroChat bridge
-        const workflowApiUrl = (resolvedData as any).workflowApiUrl || 'http://localhost:3000';
-        const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
-        await fetch(mcpEndpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: Date.now(),
-            method: 'tools/call',
-            params: {
-              name: 'get_renewal_property_details',
-              arguments: { ticketId: resolvedData.ticketId },
-            },
-          }),
-        });
-        setActionNotice('Property details retrieved for your review.');
+        return;
       }
+      const workflowApiUrl = (resolvedData as any).workflowApiUrl || 'http://localhost:3000';
+      const mcpEndpoint = workflowApiUrl.endsWith('/mcp') ? workflowApiUrl : `${workflowApiUrl.replace(/\/$/, '')}/mcp`;
+      const resp = await fetch(mcpEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: {
+            name: 'get_renewal_property_details',
+            arguments: { ticketId: resolvedData.ticketId },
+          },
+        }),
+      });
+      if (!resp.ok) throw new Error('Renewal request failed');
+    };
+
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        renewOnce(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), 20000);
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
     } catch (err) {
       console.warn('Renew policy callTool error:', err);
-      setActionNotice('Unable to retrieve property details. Please try again.');
+      setRenewalTriggered(false);
+      setActionNotice('Could not load home details. Please try again.');
     } finally {
       setIsRenewing(false);
     }
@@ -466,18 +465,13 @@ export default function PolicyServicingWidget() {
         setSignatureSigned(true);
         setAwaitingSignature(false);
         setActionNotice(null);
-        if (!announcedRef.current) {
-          announcedRef.current = true;
-          void callSigningTool('hq_docusign_status', { ticketId: resolvedData.ticketId }).catch(() => {
-            setActionNotice('Your renewal document has been signed successfully.');
-          });
-        }
+        if (resolvedData.ticketId) void announceSignedPolicy(resolvedData.ticketId);
         return;
       }
       if (signAgain) {
+        announcedRef.current = false;
         setSignatureSigned(false);
         setSignatureNeeded(true);
-        announcedRef.current = false;
       }
       setIsEsignSent(true);
       if (!result.signingUrl) throw new Error('No signing link returned');
@@ -615,7 +609,6 @@ HONEYQUOTE INSURANCE SERVICES — CERTIFICATE OF INSURANCE (COI)
 ================================================================================
 Date Generated:       ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
 Policy Number:        ${policyNum}
-Servicing Ticket ID:  ${resolvedData.ticketId}
 Underwriting Carrier: ${carrierName}
 Named Insured:        Jordan Mitchell (${verifiedEmail})
 Insured Property:     1248 SW 27th Ave, Miami, FL 33145
@@ -674,25 +667,6 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
       setTimeout(() => setActionNotice(null), 4000);
     } finally {
       setIsGeneratingCOI(false);
-    }
-  };
-
-  // Handler: Request Policy Endorsement (instant confirmation)
-  const handleRequestEndorsement = async () => {
-    if (isSubmittingEndorsement || endorsementPending) return;
-    setIsSubmittingEndorsement(true);
-    setActionNotice('Submitting policy endorsement request...');
-
-    try {
-      setEndorsementPending(true);
-      setActionNotice('✅ Endorsement request submitted and applied to your policy.');
-      setTimeout(() => setActionNotice(null), 8000);
-    } catch {
-      setEndorsementPending(true);
-      setActionNotice('Endorsement request submitted.');
-      setTimeout(() => setActionNotice(null), 4000);
-    } finally {
-      setIsSubmittingEndorsement(false);
     }
   };
 
@@ -835,7 +809,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
               )}
             </div>
             <div style={{ fontSize: '12.5px', color: colors.textSecondary, marginTop: '3px' }}>
-              Policy: <strong style={{ color: colors.textPrimary, fontWeight: 600 }}>{resolvedData.policyNumber}</strong> • Ticket: {resolvedData.ticketId}
+              Policy: <strong style={{ color: colors.textPrimary, fontWeight: 600 }}>{resolvedData.policyNumber}</strong>
             </div>
           </div>
         </div>
@@ -1193,30 +1167,11 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: '13.5px', fontWeight: 600, color: colors.textPrimary }}>DocuSign Electronic Signature</span>
-                    {showRenewedEsign && (
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          letterSpacing: '0.04em',
-                          textTransform: 'uppercase',
-                          color: '#8A4A00',
-                          background: '#FFFFFF',
-                          border: `1px solid ${colors.warningBorder}`,
-                          borderRadius: '100px',
-                          padding: '2px 8px',
-                        }}
-                      >
-                        Optional
-                      </span>
-                    )}
                   </div>
                   <div style={{ fontSize: '12px', color: colors.textSecondary, marginTop: '2px' }}>
-                    {showRenewedEsign
-                      ? 'Optional: Application requires electronic signature if requesting policy modifications'
-                      : signatureNeeded
-                        ? 'Your renewal document needs your electronic signature'
-                        : signatureSigned ? 'Your renewal document has been electronically signed' : 'No signature currently required'}
+                    {signatureNeeded
+                      ? 'Your renewal document needs your electronic signature'
+                      : signatureSigned ? 'Your renewal document has been electronically signed' : 'No signature currently required'}
                   </div>
                 </div>
               </div>
@@ -1460,19 +1415,9 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           >
             Property Details on File
           </div>
-          <div
-            style={{
-              fontSize: '12px',
-              color: colors.textSecondary,
-              marginBottom: '12px',
-              lineHeight: 1.45,
-            }}
-          >
-            Please confirm they're still accurate before your renewal checkout is prepared:
-          </div>
           <ul
             style={{
-              margin: 0,
+              margin: '12px 0 0',
               paddingLeft: '18px',
               fontSize: '12.5px',
               color: colors.textPrimary,
@@ -1511,38 +1456,6 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           flexWrap: 'wrap',
         }}
       >
-        {canManageSignature && signatureNeeded && (
-          <button
-            type="button"
-            onClick={() => handleSignDocuSign()}
-            disabled={isSigning}
-            style={{
-              flexBasis: '100%',
-              padding: '12px 20px',
-              fontSize: '13.5px',
-              fontWeight: 700,
-              borderRadius: '100px',
-              background: '#276152',
-              color: '#FFFFFF',
-              border: 'none',
-              cursor: isSigning ? 'not-allowed' : 'pointer',
-              opacity: isSigning ? 0.75 : 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              boxShadow: '0 3px 10px rgba(39, 97, 82, 0.3)',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            <span>✍️</span>
-            <span>
-              {isSigning
-                ? 'Opening DocuSign...'
-                : 'Sign Now — signature needed on 1 document'}
-            </span>
-          </button>
-        )}
         <button
           type="button"
           onClick={handleDownloadCOI}
@@ -1566,32 +1479,6 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
           }}
         >
           <span>{isGeneratingCOI ? '⏳' : '📥'}</span> {isGeneratingCOI ? 'Generating COI...' : 'Download Certificate of Insurance (COI)'}
-        </button>
-
-        <button
-          type="button"
-          onClick={handleRequestEndorsement}
-          disabled={isSubmittingEndorsement || endorsementPending}
-          style={{
-            flex: '1 1 240px',
-            padding: '10px 20px',
-            fontSize: '12.5px',
-            fontWeight: 600,
-            borderRadius: '100px',
-            background: '#276152',
-            color: '#FFFFFF',
-            border: 'none',
-            cursor: (isSubmittingEndorsement || endorsementPending) ? 'not-allowed' : 'pointer',
-            opacity: (isSubmittingEndorsement || endorsementPending) ? 0.75 : 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '8px',
-            boxShadow: '0 2px 8px rgba(39, 97, 82, 0.25)',
-            transition: 'all 0.15s ease',
-          }}
-        >
-          <span>{isSubmittingEndorsement || endorsementPending ? '⏳' : '⚙️'}</span> {isSubmittingEndorsement ? 'Submitting...' : endorsementPending ? 'Endorsement Under Review' : 'Request Policy Endorsement'}
         </button>
       </div>
       )}

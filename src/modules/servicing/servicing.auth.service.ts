@@ -279,6 +279,44 @@ export class ServicingAuthService {
     return this.getSession(sessionId)?.ticketId || null;
   }
 
+  /**
+   * Widget and follow-up calls often arrive with no chat session, or with a new one.
+   * Accept a ticket only when this process already verified it, and attach that
+   * verification to the current session key when there is one.
+   */
+  resolveVerifiedTicket(sessionId: string | undefined, requestedTicketId?: string): string | null {
+    const current = this.getVerifiedTicketId(sessionId);
+    if (current) return current;
+
+    const requested = String(requestedTicketId || '').trim();
+    if (!requested) return null;
+
+    const live = this.findLiveSessionByTicket(requested);
+    if (!live) return null;
+
+    if (sessionId && sessionId !== live.sessionId) {
+      ServicingAuthService.sessions.set(sessionId, {
+        ...live,
+        sessionId,
+        policyIntroductionPending: false,
+      });
+    }
+    return live.ticketId;
+  }
+
+  private findLiveSessionByTicket(ticketId: string): AuthenticatedSession | null {
+    const now = Date.now();
+    for (const session of ServicingAuthService.sessions.values()) {
+      if (session.ticketId !== ticketId) continue;
+      if (now - session.verifiedAt > SESSION_TTL_MS) {
+        ServicingAuthService.sessions.delete(session.sessionId);
+        continue;
+      }
+      return session;
+    }
+    return null;
+  }
+
   getVerifiedCustomerName(sessionId?: string): string | null {
     return this.getSession(sessionId)?.customerName || null;
   }

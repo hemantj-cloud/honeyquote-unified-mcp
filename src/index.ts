@@ -11,6 +11,7 @@ import { DIContainer, McpApplicationFactory } from '@nitrostack/core';
 import { AppModule } from './app.module.js';
 import { SigningService, signingReturnHtml } from './modules/servicing/signing.service.js';
 import { ServicingService } from './modules/servicing/servicing.service.js';
+import { EsignAdminService, type EsignChannel } from './modules/servicing/esign-admin.service.js';
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -67,6 +68,7 @@ async function bootstrap() {
     const container = DIContainer.getInstance();
     registerSigningRoutes(app, container.resolve(SigningService));
     registerDocumentUploadRoutes(app, container.resolve(ServicingService));
+    registerEsignAdminRoutes(app, container.resolve(EsignAdminService));
   }
 }
 
@@ -195,6 +197,80 @@ function registerDocumentUploadRoutes(app: any, servicing: ServicingService) {
   });
 
   console.log('[documents] Registered POST /api/policy/document/upload and GET /api/policy/document/status');
+}
+
+function registerEsignAdminRoutes(app: any, admin: EsignAdminService) {
+  const applyCors = (req: any, res: any) => {
+    const origin = String(req.get?.('origin') || req.headers?.origin || '');
+    const allowed = new Set(
+      ['http://localhost:3025', process.env.HQ_ESIGN_ADMIN_ORIGIN?.trim()].filter((value): value is string =>
+        Boolean(value)
+      )
+    );
+    if (origin && allowed.has(origin)) {
+      res.set('Access-Control-Allow-Origin', origin);
+      res.set('Vary', 'Origin');
+    }
+    res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Cache-Control', 'no-store');
+  };
+
+  const authorized = (req: any, res: any): boolean => {
+    const expected = process.env.HQ_ESIGN_ADMIN_TOKEN?.trim();
+    if (!expected) return true;
+    const header = String(req.get?.('authorization') || req.headers?.authorization || '');
+    if (header === `Bearer ${expected}`) return true;
+    res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return false;
+  };
+
+  app.options('/api/esign-admin/tickets', (req: any, res: any) => {
+    applyCors(req, res);
+    res.status(204).end();
+  });
+  app.options('/api/esign-admin/send', (req: any, res: any) => {
+    applyCors(req, res);
+    res.status(204).end();
+  });
+
+  app.get('/api/esign-admin/tickets', async (req: any, res: any) => {
+    applyCors(req, res);
+    if (!authorized(req, res)) return;
+    try {
+      const tickets = await admin.listTickets();
+      res.json({ ok: true, tickets });
+    } catch (err: any) {
+      console.warn('[esign-admin] list failed:', err?.message || err);
+      res.status(503).json({ ok: false, error: 'Unable to list tickets' });
+    }
+  });
+
+  app.post('/api/esign-admin/send', async (req: any, res: any) => {
+    applyCors(req, res);
+    if (!authorized(req, res)) return;
+    try {
+      const body = await readJsonBody(req);
+      const ticketId = typeof body.ticketId === 'string' ? body.ticketId.trim() : '';
+      const channel = body.channel === 'email' || body.channel === 'sms' ? (body.channel as EsignChannel) : '';
+      if (!/^[A-Z0-9-]{4,40}$/i.test(ticketId)) {
+        return res.status(400).json({ ok: false, error: 'ticketId required' });
+      }
+      if (!channel) return res.status(400).json({ ok: false, error: 'channel must be email or sms' });
+      const result = await admin.send(ticketId, channel);
+      res.status(result.statusCode).json({
+        ok: result.ok,
+        ticketId: result.ticketId,
+        ...(result.channel ? { channel: result.channel } : {}),
+        ...(result.error ? { error: result.error } : {}),
+      });
+    } catch (err: any) {
+      console.warn('[esign-admin] send failed:', err?.message || err);
+      res.status(503).json({ ok: false, error: 'Unable to send the signing links' });
+    }
+  });
+
+  console.log('[esign-admin] Registered GET /api/esign-admin/tickets and POST /api/esign-admin/send');
 }
 
 function readJsonBody(req: any): Promise<Record<string, unknown>> {

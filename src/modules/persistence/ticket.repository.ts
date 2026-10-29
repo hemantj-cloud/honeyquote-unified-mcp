@@ -35,6 +35,34 @@ export class TicketRepository {
     return this.getFallbackTicket(id);
   }
 
+  /** Every ticket in Mongo when Atlas is up, otherwise the in-memory map. Does not invent tickets. */
+  async listTickets(): Promise<SeedTicketContext[]> {
+    const merged = new Map<string, SeedTicketContext>();
+    for (const ticket of this.memoryStore.values()) {
+      if (ticket.ticketId) merged.set(ticket.ticketId, ticket);
+    }
+
+    if (this.mongoService?.isOnline()) {
+      try {
+        const col = this.mongoService.getCollection('tickets');
+        if (col) {
+          const docs = await col.find({}).toArray();
+          for (const doc of docs) {
+            const id = String(doc.ticketId || '').trim();
+            if (!id) continue;
+            const ticket = { ...(merged.get(id) || {}), ...doc, ticketId: id } as SeedTicketContext;
+            merged.set(id, ticket);
+            this.memoryStore.set(id, ticket);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[repository] Error listing tickets from Atlas: ${err.message}. Using cache.`);
+      }
+    }
+
+    return [...merged.values()];
+  }
+
   async findTicketByIdentifier(identifier: string): Promise<SeedTicketContext | null> {
     const raw = String(identifier || '').trim();
     if (!raw) return null;

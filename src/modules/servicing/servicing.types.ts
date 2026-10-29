@@ -4,7 +4,7 @@ import type { SeedTicketContext } from '../persistence/seed-data.js';
 export type HqTicketContext = SeedTicketContext;
 
 export const VERIFY_IDENTITY_PROMPT =
-  "I can help with that. First I need to verify your identity. Please share the email address or phone number on your policy, and I'll send a 6-digit verification code.";
+  "Share the email or phone on your policy. I'll send a 6-digit code.";
 
 export function unauthenticatedResult() {
   return {

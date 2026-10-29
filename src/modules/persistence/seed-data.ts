@@ -48,6 +48,9 @@ export interface SeedTicketContext {
   };
   signatureRequired: boolean;
   esignSent: boolean;
+  /** Set by the e-sign admin send API after email or SMS delivery is accepted. */
+  esignSentAt?: string | null;
+  esignChannel?: 'email' | 'sms' | null;
   signatureStatus: string;
   /** OPEN until every required supporting document is stored, then COMPLETE. */
   documentStatus?: 'OPEN' | 'COMPLETE';

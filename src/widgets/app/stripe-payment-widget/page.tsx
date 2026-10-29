@@ -414,30 +414,9 @@ export default function StripePayButtonWidget() {
           >
             {isCancelledReturn ? 'Payment cancelled' : 'Payment complete'}
           </div>
-          <div style={{ fontSize: '13px', color: textSecondary, lineHeight: 1.5, marginBottom: '20px' }}>
-            {isCancelledReturn
-              ? 'No charge was made. You can close this tab and return to your chat.'
-              : 'Your policy renewal is confirmed! Closing this tab and returning to your chat...'}
+          <div style={{ fontSize: '13px', color: textSecondary, lineHeight: 1.5 }}>
+            {isCancelledReturn ? 'No charge was made.' : 'Your policy renewal is confirmed.'}
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              try { window.close(); } catch {}
-              try { window.open('', '_self'); window.close(); } catch {}
-            }}
-            style={{
-              padding: '10px 20px',
-              borderRadius: '8px',
-              background: '#0F533A',
-              color: '#FFFFFF',
-              border: 'none',
-              fontWeight: 600,
-              fontSize: '14px',
-              cursor: 'pointer',
-            }}
-          >
-            Close Tab
-          </button>
         </div>
       </div>
     );

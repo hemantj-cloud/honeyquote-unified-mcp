@@ -63,12 +63,11 @@ export class ServicingService {
       daysUntilExpiry !== undefined &&
       daysUntilExpiry > 0 &&
       daysUntilExpiry <= 30;
-    const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'Jordan';
-    const greeting = firstName ? `Hey ${firstName}` : 'Hi';
+    const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
     const renewalInvitation = isRenewalEligible
-      ? `${greeting}, your policy expires in ${daysUntilExpiry} ${
+      ? `Hi ${firstName}, your policy expires in ${daysUntilExpiry} ${
           daysUntilExpiry === 1 ? 'day' : 'days'
-        } and looks ready for renewal. Would you like to renew now? Click **Renew Policy** or reply **yes**, and I’ll guide you through the renewal process.`
+        }. Click **Renew Policy**, or just type **yes**.`
       : undefined;
 
     return { daysUntilExpiry, isRenewalEligible, renewalInvitation };
@@ -80,14 +79,18 @@ export class ServicingService {
   }
 
   /**
-   * Under-card prompt after a paid customer verifies again and the new term
-   * still needs a signature. Sign Now on the card opens DocuSign; a yes in chat
-   * generates the link and shows the signing widget.
+   * Under-card prompt after payment when the new term still needs a signature.
+   * Sign Now on the servicing card opens DocuSign; typing yes generates the link.
    */
-  getSigningConsentInvitation(ctx: HqTicketContext): string | undefined {
+  getSigningConsentInvitation(ctx: {
+    status?: string;
+    paymentStatus?: string;
+    signatureStatus?: string;
+    customerName?: string;
+  }): string | undefined {
     if (!this.isPolicyPaid(ctx) || ctx.signatureStatus === 'signed') return undefined;
     const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
-    return `Hey ${firstName}, please sign the renewal document — tap **Sign Now** or say **yes**, and I'll guide you through the e-sign process.`;
+    return `One last step, ${firstName}. Type **yes** or tap **Sign Now** and I'll open the document.`;
   }
 
   formatPolicySummary(ctx: HqTicketContext): string {
