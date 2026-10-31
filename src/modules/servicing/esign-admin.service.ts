@@ -188,10 +188,15 @@ export class EsignAdminService {
 
     const sid = process.env.TWILIO_ACCOUNT_SID?.trim();
     const token = process.env.TWILIO_AUTH_TOKEN?.trim();
+    const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID?.trim();
     const from = process.env.TWILIO_FROM_NUMBER?.trim() || process.env.TWILIO_PHONE_NUMBER?.trim();
-    if (!sid || !token || !from) {
+    if (!sid || !token || (!messagingServiceSid && !from)) {
       return { ok: false, statusCode: 503, error: 'SMS is not configured.' };
     }
+
+    const params = new URLSearchParams({ To: phone, Body: body });
+    if (messagingServiceSid) params.set('MessagingServiceSid', messagingServiceSid);
+    else params.set('From', from!);
 
     try {
       const response = await fetch(
@@ -202,13 +207,29 @@ export class EsignAdminService {
             Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`,
             'Content-Type': 'application/x-www-form-urlencoded',
           },
-          body: new URLSearchParams({ To: phone, From: from, Body: body }).toString(),
+          body: params.toString(),
           signal: AbortSignal.timeout(20000),
         }
       );
       if (!response.ok) {
-        console.warn(`[esign-admin] SMS failed (HTTP ${response.status})`);
-        return { ok: false, statusCode: 503, error: 'SMS provider could not send the signing links.' };
+        let code = '';
+        let message = '';
+        try {
+          const errBody = (await response.json()) as { code?: number | string; message?: string };
+          if (errBody.code != null) code = String(errBody.code);
+          if (typeof errBody.message === 'string') message = errBody.message;
+        } catch {
+          // Twilio sometimes returns a non-JSON error page.
+        }
+        console.warn(
+          `[esign-admin] SMS failed (HTTP ${response.status}${code ? ` ${code}` : ''}${message ? `: ${message}` : ''})`
+        );
+        const detail = [code ? `Twilio ${code}` : '', message].filter(Boolean).join(': ');
+        return {
+          ok: false,
+          statusCode: 503,
+          error: detail || 'SMS provider could not send the signing links.',
+        };
       }
       const data = (await response.json()) as { sid?: string };
       if (!data.sid) return { ok: false, statusCode: 503, error: 'SMS delivery was not accepted.' };

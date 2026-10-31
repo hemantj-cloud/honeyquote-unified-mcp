@@ -301,19 +301,32 @@ export class ServicingTools {
   @Tool({
     name: 'get_renewal_property_details',
     description:
-      'Shows the on-record home details in the policy card for an authenticated renewal that is not yet paid. Requires verified session. Do not call it when payment is already complete — that path shows Sign Now instead. Call once for typed renewal intent; the Renew Policy widget already invokes it directly. Relay userFacing only — the card lists the details. When the customer then confirms, call hq_stripe_create_payment_link with ticketId only.',
+      'Shows the on-record home details in the policy card. Requires a verified session. Use intent "view" whenever the customer asks to see property or home details, before or after payment. That card is read-only: relay userFacing only, and do not start checkout or signing. Use intent "renew" only to start an unpaid renewal. A yes after a renew card calls hq_stripe_create_payment_link with ticketId only.',
     inputSchema: z.object({
       ticketId: z.string().optional().describe('Verified session ticket ID (e.g. HQ-DEMO-001)'),
+      intent: z
+        .enum(['view', 'renew'])
+        .optional()
+        .describe('view shows the home list only. renew starts unpaid renewal confirmation. Defaults to view.'),
     }),
   })
   @Widget(POLICY_WIDGET)
-  async getRenewalPropertyDetails(input: { ticketId?: string }, ctx: ExecutionContext) {
+  async getRenewalPropertyDetails(
+    input: { ticketId?: string; intent?: 'view' | 'renew' },
+    ctx: ExecutionContext
+  ) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
     if (!ticketId) return unauthenticatedResult();
 
     const existing = await this.servicingService.getTicketContext(ticketId);
-    if (this.servicingService.isPolicyPaid(existing)) {
-      return this.policyDetailsResult(ticketId, sessionKeyOf(ctx));
+    const renewing = input.intent === 'renew' && !this.servicingService.isPolicyPaid(existing);
+    if (!renewing) {
+      await this.servicingService.appendConversationTurn(
+        ticketId,
+        'assistant',
+        'Shared on-file property details.'
+      );
+      return this.propertyConfirmationResult(ticketId, 'Here are the property details on file.', [], true);
     }
 
     await this.servicingService.appendConversationTurn(
@@ -393,7 +406,12 @@ export class ServicingTools {
     );
   }
 
-  private async propertyConfirmationResult(ticketId: string, userFacing: string, updatedFields: string[] = []) {
+  private async propertyConfirmationResult(
+    ticketId: string,
+    userFacing: string,
+    updatedFields: string[] = [],
+    readOnly = false
+  ) {
     const context = await this.servicingService.getTicketContext(ticketId);
     const attrs = {
       ...context.propertyAttributes,
@@ -404,25 +422,34 @@ export class ServicingTools {
     const firstName = context.customerName?.trim().split(/\s+/)[0] || 'there';
     const formattedAddress = String(attrs.address || '').trim();
     // A change must keep the turn open so the model can call show_quote_rates immediately.
-    const preventFollowUp = !detailsChanged;
+    const preventFollowUp = readOnly || !detailsChanged;
 
     return {
       userFacing,
       // NitroChat renders this under the card, after the widget.
-      renewalInvitation: detailsChanged
-        ? `Those details changed, ${firstName}. Pick a carrier below to continue to checkout.`
-        : "If they do, type **yes** and we'll go to checkout.",
+      ...(readOnly
+        ? {}
+        : {
+            renewalInvitation: detailsChanged
+              ? `Those details changed, ${firstName}. Pick a carrier below to continue to checkout.`
+              : "If they do, type **yes** and we'll go to checkout.",
+          }),
       preventFollowUp,
       internal: {
         stage: 'awaiting_property_confirmation',
         awaitingPropertyConfirmation: true,
+        ...(readOnly ? { propertyDetailsReadOnly: true, paid: true } : {}),
         authenticated: true,
         preventFollowUp,
-        presentation: 'renewal',
-        nextTool: detailsChanged ? 'show_quote_rates' : 'hq_stripe_create_payment_link',
-        nextToolArgs: detailsChanged
-          ? { quoteId: 1, formattedAddress, ticketId }
-          : { ticketId },
+        presentation: readOnly ? 'servicing' : 'renewal',
+        ...(readOnly
+          ? {}
+          : {
+              nextTool: detailsChanged ? 'show_quote_rates' : 'hq_stripe_create_payment_link',
+              nextToolArgs: detailsChanged
+                ? { quoteId: 1, formattedAddress, ticketId }
+                : { ticketId },
+            }),
         ticketId,
         policyNumber: context.policyNumber,
         carrier: context.carrier,
@@ -444,7 +471,7 @@ export class ServicingTools {
         propertyAttributes: attrs,
         propertyDetailsUpdated: updatedFields.length > 0,
         updatedFields,
-        correctionTool: 'update_renewal_property_details',
+        ...(readOnly ? {} : { correctionTool: 'update_renewal_property_details' }),
       },
     };
   }

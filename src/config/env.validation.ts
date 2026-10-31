@@ -25,7 +25,8 @@ export const envSchema = z.object({
   TWILIO_VERIFY_SERVICE_SID: z.string().optional(),
   TWILIO_FROM_NUMBER: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
-  DEFAULT_CUSTOMER_PHONE: z.string().default('+919503760623'),
+  TWILIO_MESSAGING_SERVICE_SID: z.string().optional(),
+  DEFAULT_CUSTOMER_PHONE: z.string().default('+918695952729'),
   HQ_ESIGN_ADMIN_TOKEN: z.string().optional(),
   HQ_ESIGN_ADMIN_ORIGIN: z.string().optional(),
   HQ_ESIGN_CHAT_URL: z.string().optional(),
@@ -35,7 +36,7 @@ export const envSchema = z.object({
   GMAIL_CLIENT_SECRET: z.string().optional(),
   GMAIL_REFRESH_TOKEN: z.string().optional(),
   GMAIL_FROM: z.string().optional(),
-  DEMO_CUSTOMER_EMAIL: z.string().default('hemantj@wekancode.com'),
+  DEMO_CUSTOMER_EMAIL: z.string().default('navarathinamc@wekancode.com'),
 
   // Slack HITL
   SLACK_ENABLED: z.coerce.boolean().default(false),

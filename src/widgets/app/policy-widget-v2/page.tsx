@@ -82,6 +82,7 @@ export default function PolicyServicingWidget() {
     activeInternal.awaitingPropertyConfirmation === true ||
     activeInternal.stage === 'awaiting_property_confirmation'
   );
+  const propertyDetailsReadOnly = activeInternal.propertyDetailsReadOnly === true;
 
   // Report the card's own height so the narrow chat column is not held open by a floor
   // or by the host document's scroll height.
@@ -400,6 +401,7 @@ export default function PolicyServicingWidget() {
       if (typeof openaiSdk?.callTool === 'function') {
         await openaiSdk.callTool('get_renewal_property_details', {
           ticketId: resolvedData.ticketId,
+          intent: 'renew',
         });
         return;
       }
@@ -414,7 +416,7 @@ export default function PolicyServicingWidget() {
           method: 'tools/call',
           params: {
             name: 'get_renewal_property_details',
-            arguments: { ticketId: resolvedData.ticketId },
+            arguments: { ticketId: resolvedData.ticketId, intent: 'renew' },
           },
         }),
       });
@@ -866,7 +868,7 @@ Digital Verification Hash: COI-${resolvedData.ticketId}-${Date.now().toString(36
       )}
 
       {/* Expiration Alert Banner: dynamically rendered when policy expires within renewal window (<= 30 days) */}
-      {isRenewalWindow && (
+      {isRenewalWindow && !propertyDetailsReadOnly && (
         <div
           style={{
             background: colors.warningBg,
