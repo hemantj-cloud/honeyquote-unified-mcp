@@ -323,11 +323,75 @@ async function seed() {
     createdAt: new Date().toISOString(),
   };
 
+  const chetanTicket = {
+    ticketId: 'HQ-DEMO-006',
+    subject: 'New business binding — signature outstanding',
+    status: 'new',
+    customerName: 'Chetan K',
+    policyNumber: 'HQ-POL-88426',
+    carrier: 'Citizens',
+    billedToMortgage: true,
+    recipientEmail: 'chetank@wekan.company',
+    customerEmail: 'chetank@wekan.company',
+    customerPhone: '+916380430179',
+    mortgageeEmail: 'escrow@examplemortgage.com',
+    userId: '6ad9bd5dcfc164fb5ece28e1',
+    propertyAddress: '920 South Pointe Dr, Miami Beach, FL 33139',
+    propertyAttributes: {
+      address: '920 South Pointe Dr, Miami Beach, FL 33139',
+      yearBuilt: 2012,
+      squareFootage: 1950,
+      constructionType: 'Concrete Block / Stucco',
+      roofType: 'Concrete Tile',
+      roofGeometry: 'Hip Roof',
+      roofYear: 2021,
+      stories: 2,
+      primaryUse: 'Single Family Residence (Owner Occupied)',
+      primaryHeating: 'Central',
+      plumbingSystem: 'Copper',
+      electricalPanel: 'CircuitBreaker',
+    },
+    effectiveDate: '2025-10-28',
+    renewalDate: '2026-12-02',
+    daysUntilExpiry: 26,
+    isRenewalEligible: true,
+    policyStatus: 'active',
+    paymentStatus: 'UNPAID',
+    coverages: {
+      dwelling: 440000,
+      personalProperty: 220000,
+      lossOfUse: 88000,
+      liability: 300000,
+      medicalPayments: 5000,
+    },
+    deductibles: {
+      hurricane: 2500,
+      hurricanePercentage: '2%',
+      allOtherPerils: 1000,
+    },
+    signatureRequired: true,
+    esignSent: false,
+    signatureStatus: 'pending',
+    missingDocuments: ['application', 'supplemental_signature_page'],
+    renewalPremium: 2140,
+    conversations: [],
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
   await db.collection('tickets').createIndex({ ticketId: 1 }, { unique: true });
   await db.collection('tickets').createIndex({ customerPhone: 1 });
   await db.collection('tickets').createIndex({ recipientEmail: 1 });
 
-  const seedTickets = [demoTicket, omniTicket, navarathinamTicket, hemantTicket, arpanTicket, navaTicket];
+  const seedTickets = [
+    demoTicket,
+    omniTicket,
+    navarathinamTicket,
+    hemantTicket,
+    arpanTicket,
+    navaTicket,
+    chetanTicket,
+  ];
 
   for (const t of seedTickets) {
     await db.collection('tickets').replaceOne({ ticketId: t.ticketId }, t, { upsert: true });
