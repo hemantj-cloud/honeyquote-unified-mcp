@@ -8,6 +8,7 @@ import {
 import { Injectable } from "@nitrostack/core";
 import { InsuranceService } from "./insurance.service.js";
 import { swarmValuationPropertyAttributesSchema } from "./insurance.types.js";
+import { QUOTES_READY_SUMMARY } from "../servicing/servicing.messages.js";
 
 const QUOTE_RATES_BASE_URL =
   "https://mcp-server-qa.cda7df0f963e4a14a920.eastus.aksapp.io/api/v1/quotes/rates";
@@ -150,7 +151,7 @@ export class DemoTools {
   async showQuoteRates(input: { quoteId: number; formattedAddress: string; ticketId?: string }) {
     return {
       userFacing: {
-        summary: `Your rates for ${input.formattedAddress} are ready below.`,
+        summary: QUOTES_READY_SUMMARY,
         formattedAddress: input.formattedAddress,
       },
       preventFollowUp: true,

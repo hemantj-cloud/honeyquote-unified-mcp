@@ -448,7 +448,7 @@ export default function PolicyServicingWidget() {
   const handleSignDocuSign = async () => {
     if (isSigning || !canManageSignature || (!signatureNeeded && !signatureSigned)) return;
     setIsSigning(true);
-    setActionNotice('Preparing your document...');
+    setActionNotice('Preparing your documents for renewal...');
 
     try {
       const signAgain = signatureSigned === true;

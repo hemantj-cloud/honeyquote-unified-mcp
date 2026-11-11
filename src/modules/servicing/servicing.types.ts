@@ -3,12 +3,14 @@ import type { SeedTicketContext } from '../persistence/seed-data.js';
 
 export type HqTicketContext = SeedTicketContext;
 
-export const VERIFY_IDENTITY_PROMPT =
-  "Share the email or phone on your policy. I'll send a 6-digit code.";
+import { IDENTITY_REMINDER_PROMPT } from './servicing.messages.js';
 
-export function unauthenticatedResult() {
+/** @deprecated Use ServicingAuthService.getUnverifiedIdentityPrompt for session-aware welcome */
+export const VERIFY_IDENTITY_PROMPT = IDENTITY_REMINDER_PROMPT;
+
+export function unauthenticatedResult(userFacing?: string) {
   return {
-    userFacing: VERIFY_IDENTITY_PROMPT,
+    userFacing: userFacing ?? IDENTITY_REMINDER_PROMPT,
     internal: {
       success: false,
       authenticated: false,

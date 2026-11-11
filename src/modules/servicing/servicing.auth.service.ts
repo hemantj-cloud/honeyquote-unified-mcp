@@ -1,6 +1,7 @@
 import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { Injectable } from '@nitrostack/core';
 import { OtpChallenge } from './servicing.types.js';
+import { IDENTITY_REMINDER_PROMPT, WELCOME_AND_IDENTITY_PROMPT } from './servicing.messages.js';
 import { TicketRepository } from '../persistence/ticket.repository.js';
 import { EmailService } from '../integrations/email.service.js';
 
@@ -47,6 +48,21 @@ export class ServicingAuthService {
   private static pendingChallenges = new Map<string, OtpChallenge>();
   private static missedChannels = new Map<string, Set<'email' | 'sms'>>();
   private static sessions = new Map<string, AuthenticatedSession>();
+  /** false = welcome already shown or OTP started for this chat session key */
+  private static welcomePendingBySession = new Map<string, boolean>();
+
+  getUnverifiedIdentityPrompt(sessionId?: string): string {
+    const key = String(sessionId || '').trim();
+    if (!key || ServicingAuthService.welcomePendingBySession.get(key) !== false) {
+      return WELCOME_AND_IDENTITY_PROMPT;
+    }
+    return IDENTITY_REMINDER_PROMPT;
+  }
+
+  markWelcomeComplete(sessionId?: string): void {
+    const key = String(sessionId || '').trim();
+    if (key) ServicingAuthService.welcomePendingBySession.set(key, false);
+  }
 
   private twilioSid = process.env.TWILIO_ACCOUNT_SID || '';
   private twilioToken = process.env.TWILIO_AUTH_TOKEN || '';
@@ -131,6 +147,7 @@ export class ServicingAuthService {
 
   async requestOtp(identifier: string, sessionId?: string): Promise<OtpRequestResult> {
     if (!sessionId) return { sent: false, reason: 'no_session' };
+    this.markWelcomeComplete(sessionId);
 
     const raw = String(identifier || '').trim();
     const channel: 'email' | 'sms' = this.isEmail(raw.toLowerCase()) ? 'email' : 'sms';

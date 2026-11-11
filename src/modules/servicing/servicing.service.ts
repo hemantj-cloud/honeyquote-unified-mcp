@@ -3,6 +3,7 @@ import { TicketRepository } from '../persistence/ticket.repository.js';
 import { EmailService } from '../integrations/email.service.js';
 import type { UploadedDocumentRecord } from '../persistence/seed-data.js';
 import type { HqTicketContext } from './servicing.types.js';
+import { DOCUSIGN_SIGN_INVITE, POLICY_EXPIRY_RENEWAL_INVITE } from './servicing.messages.js';
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'png', 'jpg', 'jpeg']);
@@ -63,11 +64,8 @@ export class ServicingService {
       daysUntilExpiry !== undefined &&
       daysUntilExpiry > 0 &&
       daysUntilExpiry <= 30;
-    const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
     const renewalInvitation = isRenewalEligible
-      ? `Hi ${firstName}, your policy expires in ${daysUntilExpiry} ${
-          daysUntilExpiry === 1 ? 'day' : 'days'
-        }. Click **Renew Policy**, or just type **yes**.`
+      ? `${POLICY_EXPIRY_RENEWAL_INVITE} Click **Renew Policy**, or type **yes** to continue.`
       : undefined;
 
     return { daysUntilExpiry, isRenewalEligible, renewalInvitation };
@@ -90,7 +88,7 @@ export class ServicingService {
   }): string | undefined {
     if (!this.isPolicyPaid(ctx) || ctx.signatureStatus === 'signed') return undefined;
     const firstName = ctx.customerName?.trim().split(/\s+/)[0] || 'there';
-    return `One last step, ${firstName}. Type **yes** or tap **Sign Now** and I'll open the document.`;
+    return DOCUSIGN_SIGN_INVITE;
   }
 
   formatPolicySummary(ctx: HqTicketContext): string {

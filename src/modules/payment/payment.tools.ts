@@ -8,6 +8,11 @@ import { PaymentService } from './payment.service.js';
 import { ServicingAuthService } from '../servicing/servicing.auth.service.js';
 import { ServicingService } from '../servicing/servicing.service.js';
 import { unauthenticatedResult } from '../servicing/servicing.types.js';
+import {
+  renewalCompletedCongrats,
+  stripeCheckoutIntro,
+  stripePaymentSuccess,
+} from '../servicing/servicing.messages.js';
 import { sessionKeyOf } from '../servicing/session-key.js';
 import {
   createPaymentLinkSchema,
@@ -61,7 +66,11 @@ export class PaymentTools {
   @Widget(STRIPE_PAYMENT_WIDGET)
   async createPaymentLink(input: CreatePaymentLinkInput, ctx: ExecutionContext) {
     const ticketId = this.authService.resolveVerifiedTicket(sessionKeyOf(ctx), input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) {
+      return unauthenticatedResult(
+        this.authService.getUnverifiedIdentityPrompt(sessionKeyOf(ctx))
+      );
+    }
 
     const result = await this.paymentService.createPaymentLink({
       ...input,
@@ -80,8 +89,8 @@ export class PaymentTools {
       });
       return {
         userFacing: result.signed
-          ? `Great news, ${firstName} — your ${result.carrier} policy is renewed. And the document is signed.`
-          : signingInvitation || `One last step, ${firstName}. Type **yes** or tap **Sign Now** and I'll open the document.`,
+          ? renewalCompletedCongrats(firstName)
+          : signingInvitation || stripePaymentSuccess('$0.00'),
         preventFollowUp: true,
         internal: {
           authenticated: false,
@@ -105,7 +114,7 @@ export class PaymentTools {
     const firstName = String(result.customerName || '').trim().split(/\s+/)[0] || 'there';
 
     return {
-      userFacing: `${firstName}, your renewal with **${result.carrier}** is **${formattedPremium}/year**. The checkout card is just below.`,
+      userFacing: stripeCheckoutIntro(`${formattedPremium}/year`),
       preventFollowUp: true,
       internal: {
         preventFollowUp: true,
@@ -159,14 +168,19 @@ export class PaymentTools {
       customerName: context.customerName,
     });
 
-    const carrierName = context.carrier || 'Citizens';
+    const premiumAmount =
+      context.renewalPremium ?? context.amountPaid ?? result.context?.renewalPremium;
+    const premiumFormatted =
+      typeof premiumAmount === 'number'
+        ? `$${premiumAmount.toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`
+        : '$0.00';
     const firstName = String(context.customerName || '').trim().split(/\s+/)[0] || 'there';
-    const paymentConfirmation = `Great news, ${firstName} — your ${carrierName} policy is renewed.`;
 
     return {
-      userFacing: isSigned
-        ? `${paymentConfirmation} And the document is signed.`
-        : paymentConfirmation,
+      userFacing: isSigned ? renewalCompletedCongrats(firstName) : stripePaymentSuccess(premiumFormatted),
       ...(isSigned || !signingInvitation ? {} : { renewalInvitation: signingInvitation }),
       preventFollowUp: true,
       internal: {

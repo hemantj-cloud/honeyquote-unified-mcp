@@ -21,6 +21,19 @@ import {
   GetPendingTasksInput,
   unauthenticatedResult,
 } from './servicing.types.js';
+import {
+  CLOSING_THANK_YOU,
+  DOCUSIGN_SIGN_INVITE,
+  FETCHING_QUOTES_INVITE,
+  OTP_SENT_PROMPT,
+  PROPERTY_CONFIRM_YES_INVITE,
+  PROPERTY_UPDATED_SUCCESS,
+  RENEWAL_PROPERTY_CONFIRM_INTRO,
+  renewalCompletedCongrats,
+  SIGNATURE_CONFIRMED,
+  verificationSuccessIntro,
+  POLICY_DETAILS_REPEAT_INTRO,
+} from './servicing.messages.js';
 
 const POLICY_WIDGET = {
   route: 'policy-widget-v2',
@@ -82,6 +95,10 @@ export class ServicingTools {
     return this.authService.resolveVerifiedTicket(sessionKeyOf(ctx), requestedTicketId);
   }
 
+  private unauthenticatedFor(ctx: ExecutionContext) {
+    return unauthenticatedResult(this.authService.getUnverifiedIdentityPrompt(sessionKeyOf(ctx)));
+  }
+
   @Tool({
     name: 'send_customer_otp',
     description:
@@ -95,7 +112,7 @@ export class ServicingTools {
     // NitroChat renders userFacing itself; preventFollowUp stops the model from repeating it.
     if (result.sent) {
       return {
-        userFacing: `A verification code has been sent to ${destination}. Please reply with the 6-digit code to continue.`,
+        userFacing: OTP_SENT_PROMPT,
         preventFollowUp: true,
         internal: {
           sent: true,
@@ -167,7 +184,7 @@ export class ServicingTools {
   @Widget(POLICY_WIDGET)
   async getPolicyDetails(input: GetPolicyDetailsInput, ctx: ExecutionContext) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) return this.unauthenticatedFor(ctx);
     return this.policyDetailsResult(ticketId, sessionKeyOf(ctx));
   }
 
@@ -183,8 +200,8 @@ export class ServicingTools {
 
     const firstName = context.customerName?.trim().split(/\s+/)[0] || 'there';
     const introduction = this.authService.consumePolicyIntroduction(ticketId, sessionKey)
-      ? `Good to see you, ${firstName}. Here's your policy.`
-      : 'Your policy is in the card below.';
+      ? verificationSuccessIntro(firstName)
+      : POLICY_DETAILS_REPEAT_INTRO;
 
     // A paid term that still needs a signature shows e-sign, not another renewal.
     // Sign Now on the card opens DocuSign; a yes in chat generates the link.
@@ -245,7 +262,7 @@ export class ServicingTools {
   @Widget(POLICY_WIDGET)
   async getPendingTasks(input: GetPendingTasksInput, ctx: ExecutionContext) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) return this.unauthenticatedFor(ctx);
 
     const context = await this.servicingService.getTicketContext(ticketId);
     const taskSummary = this.servicingService.formatPendingTasks(context);
@@ -316,7 +333,7 @@ export class ServicingTools {
     ctx: ExecutionContext
   ) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) return this.unauthenticatedFor(ctx);
 
     const existing = await this.servicingService.getTicketContext(ticketId);
     const renewing = input.intent === 'renew' && !this.servicingService.isPolicyPaid(existing);
@@ -334,8 +351,7 @@ export class ServicingTools {
       'assistant',
       'Presented renewal home details reconfirmation.'
     );
-    const firstName = existing.customerName?.trim().split(/\s+/)[0] || 'there';
-    return this.propertyConfirmationResult(ticketId, `${firstName}, do these home details still look right?`);
+    return this.propertyConfirmationResult(ticketId, RENEWAL_PROPERTY_CONFIRM_INTRO);
   }
 
   @Tool({
@@ -368,7 +384,7 @@ export class ServicingTools {
     ctx: ExecutionContext
   ) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) return this.unauthenticatedFor(ctx);
 
     const existing = await this.servicingService.getTicketContext(ticketId);
     if (this.servicingService.isPolicyPaid(existing)) {
@@ -397,13 +413,7 @@ export class ServicingTools {
       'assistant',
       `Updated renewal home details on file: ${labels.join(', ')}.`
     );
-    const joined = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}` : labels[0];
-    const firstName = existing.customerName?.trim().split(/\s+/)[0] || 'there';
-    return this.propertyConfirmationResult(
-      ticketId,
-      `Updated your ${joined}, ${firstName}.`,
-      changed
-    );
+    return this.propertyConfirmationResult(ticketId, PROPERTY_UPDATED_SUCCESS, changed);
   }
 
   private async propertyConfirmationResult(
@@ -431,8 +441,8 @@ export class ServicingTools {
         ? {}
         : {
             renewalInvitation: detailsChanged
-              ? `Those details changed, ${firstName}. Pick a carrier below to continue to checkout.`
-              : "If they do, type **yes** and we'll go to checkout.",
+              ? FETCHING_QUOTES_INVITE
+              : PROPERTY_CONFIRM_YES_INVITE,
           }),
       preventFollowUp,
       internal: {
@@ -490,7 +500,7 @@ export class ServicingTools {
     ctx: ExecutionContext
   ) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return unauthenticatedResult();
+    if (!ticketId) return this.unauthenticatedFor(ctx);
     const context = await this.servicingService.getTicketContext(ticketId);
     const targetEmail = input.email || context.recipientEmail || 'hemantj@wekancode.com';
 
@@ -537,7 +547,7 @@ export class ServicingTools {
   @Widget(SIGNING_WIDGET)
   async docusignSend(input: { ticketId?: string; force?: boolean }, ctx: ExecutionContext) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return { success: false, ...unauthenticatedResult() };
+    if (!ticketId) return { success: false, ...this.unauthenticatedFor(ctx) };
 
     try {
       const context = await this.servicingService.getTicketContext(ticketId);
@@ -555,8 +565,7 @@ export class ServicingTools {
         success: true,
         preventFollowUp: true,
         status: 'WIDGET_MOUNTED',
-        userFacing:
-          'Your document is ready to sign.\n\nPlease use the signing widget below to open DocuSign and sign:',
+        userFacing: DOCUSIGN_SIGN_INVITE,
         internal: {
           ...result,
           success: true,
@@ -601,7 +610,7 @@ export class ServicingTools {
   @Widget(POLICY_WIDGET)
   async docusignStatus(input: { ticketId?: string }, ctx: ExecutionContext) {
     const ticketId = this.verifiedTicket(ctx, input.ticketId);
-    if (!ticketId) return { success: false, ...unauthenticatedResult() };
+    if (!ticketId) return { success: false, ...this.unauthenticatedFor(ctx) };
 
     try {
       const result = await this.signingService.signatureStatus(ticketId);
@@ -628,9 +637,12 @@ export class ServicingTools {
       success: true,
       preventFollowUp: true,
       status: 'WIDGET_MOUNTED',
-      userFacing: signedNow
-        ? `All set, ${firstName}. Your renewal is signed, and the updated policy is in the card.`
-        : 'Document signature is still pending.',
+      userFacing: signedNow ? SIGNATURE_CONFIRMED : 'Document signature is still pending.',
+      ...(signedNow
+        ? {
+            renewalInvitation: `${renewalCompletedCongrats(firstName)}\n\n${CLOSING_THANK_YOU}`,
+          }
+        : {}),
       internal: {
         success: true,
         authenticated: true,
